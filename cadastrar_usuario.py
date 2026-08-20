@@ -18,6 +18,7 @@ def cadastrar_operador():
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) # [ATIVO] Primária
     #cap = cv2.VideoCapture(1) # [DESATIVADO] Secundária
+
     print("\n📷 Câmera ligada. Olhe para a lente e aperte a tecla 's' para capturar a face.")
 
     while True:

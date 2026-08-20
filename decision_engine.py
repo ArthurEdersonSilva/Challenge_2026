@@ -100,7 +100,7 @@ def processar_regras_situacionais(results, poligono_risco, matricula, operador, 
                 if verificar_ponto_em_poligono(ponto_base, poligono_risco) >= 0:
                     tem_pessoa_na_zona = True
 
-            if label in ["Without Helmet", "Without Glass", "Without Mask", "Without Glove", "Without Ear Protectors"]:
+            if label in ["Without Helmet", "Without Glass", "Without Mask", "Without Glove", "Without Ear Protectors", "Without Safety Vest"]:
                 infracoes_detectadas.append(label)
 
     fadiga_detectada = False
