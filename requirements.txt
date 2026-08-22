@@ -1,0 +1,10 @@
+ultralytics
+opencv-python
+torch
+pygrabber
+numpy
+mediapipe
+face-recognition
+cmake
+deepface
+tf-keras

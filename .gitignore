@@ -1,0 +1,8 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+yolov8n.pt
+yolov8n-pose.pt
+historico_incidentes.csv
+.vscode/
