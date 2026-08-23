@@ -4,31 +4,26 @@ import os
 import time
 from datetime import datetime
 
-import winsound
-
 import config
 
 
 # ============================================================
-# ESTADO POR CÂMERA / PESSOA
+# ESTADOS
 # ============================================================
 
-# Evita que o contador de ergonomia seja compartilhado
-# entre pessoas ou câmeras.
 contadores_fadiga = {}
 
-# Guarda o último estado de cada câmera.
-estados_severidade = {}
-
-# Guarda quando cada incidente foi registrado pela última vez.
-ultimos_incidentes = {}
+incidentes_ativos = {}
 
 
 # ============================================================
 # FUNÇÕES BÁSICAS
 # ============================================================
 
-def verificar_ponto_em_poligono(ponto, poligono):
+def verificar_ponto_em_poligono(
+    ponto,
+    poligono
+):
 
     if poligono is None:
         return -1
@@ -101,7 +96,7 @@ def avaliar_fadiga_ergonomica(
         identificador
     ] = contador
 
-    return contador > limite_frames
+    return contador >= limite_frames
 
 
 # ============================================================
@@ -110,14 +105,13 @@ def avaliar_fadiga_ergonomica(
 
 def registrar_incidente_csv(
     severidade,
-    infracoes,
+    tipo_infracao,
     matricula,
     operador,
     frame,
     camera_id=None,
     camera_nome=None,
-    ambiente=None,
-    epis_faltantes=None
+    ambiente=None
 ):
 
     caminho_csv = getattr(
@@ -147,32 +141,28 @@ def registrar_incidente_csv(
         "%Y%m%d_%H%M%S_%f"
     )
 
-    if infracoes:
+    matricula_segura = (
+        str(matricula)
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
 
-        lista_infracoes = "; ".join(
-            infracoes
-        )
+    camera_segura = (
+        str(camera_id)
+        if camera_id is not None
+        else "global"
+    )
 
-    elif epis_faltantes:
-
-        lista_infracoes = (
-            "EPI faltante: "
-            + "; ".join(epis_faltantes)
-        )
-
-    else:
-
-        lista_infracoes = (
-            "Fadiga Ergonomica"
-        )
-
-    matricula_segura = str(
-        matricula
-    ).replace("/", "_")
+    tipo_seguro = (
+        str(tipo_infracao)
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
 
     nome_foto = (
-        f"infra_"
+        f"cam_{camera_segura}_"
         f"{matricula_segura}_"
+        f"{tipo_seguro}_"
         f"{timestamp_arquivo}.jpg"
     )
 
@@ -185,10 +175,16 @@ def registrar_incidente_csv(
 
         try:
 
-            cv2.imwrite(
+            sucesso = cv2.imwrite(
                 caminho_foto,
                 frame
             )
+
+            if not sucesso:
+
+                caminho_foto = (
+                    "FALHA_NA_CAPTURA_DO_FRAME"
+                )
 
         except Exception:
 
@@ -213,9 +209,11 @@ def registrar_incidente_csv(
             mode="a",
             newline="",
             encoding="utf-8"
-        ) as file:
+        ) as arquivo:
 
-            writer = csv.writer(file)
+            writer = csv.writer(
+                arquivo
+            )
 
             if arquivo_novo:
 
@@ -227,8 +225,7 @@ def registrar_incidente_csv(
                     "Matricula",
                     "Operador",
                     "Severidade",
-                    "Infracoes",
-                    "EPIs_Faltantes",
+                    "Tipo_Infracao",
                     "Foto_Prova",
                 ])
 
@@ -240,88 +237,204 @@ def registrar_incidente_csv(
                 matricula,
                 operador,
                 severidade,
-                lista_infracoes,
-                "; ".join(
-                    epis_faltantes or []
-                ),
+                tipo_infracao,
                 caminho_foto,
             ])
+
+        print(
+            f"📸 Incidente registrado: "
+            f"{tipo_infracao} | "
+            f"{camera_nome} | "
+            f"{matricula}"
+        )
 
     except Exception as erro:
 
         print(
-            f"⚠️ Erro ao registrar incidente: "
+            f"❌ Erro ao registrar incidente: "
             f"{erro}"
         )
 
 
 # ============================================================
-# ALERTA SONORO
+# CHAVE DO INCIDENTE
 # ============================================================
 
-def disparar_alerta_proativo(
-    severidade
+def criar_chave_incidente(
+    camera_id,
+    matricula,
+    tipo_infracao
 ):
 
-    if severidade != "CRITICA":
-        return
-
-    frequencia = getattr(
-        config,
-        "FREQ_BEEP_CRITICO",
-        1500
+    camera = (
+        str(camera_id)
+        if camera_id is not None
+        else "global"
     )
 
-    duracao = getattr(
-        config,
-        "DURACAO_BEEP_CRITICO",
-        400
+    matricula = (
+        str(matricula)
+        if matricula
+        else "desconhecido"
     )
 
-    try:
-
-        winsound.Beep(
-            frequencia,
-            duracao
-        )
-
-    except Exception:
-
-        pass
+    return (
+        f"{camera}|"
+        f"{matricula}|"
+        f"{tipo_infracao}"
+    )
 
 
 # ============================================================
-# CONTROLE DE REPETIÇÃO
+# ESTADO DO INCIDENTE
 # ============================================================
 
-def pode_registrar_incidente(
-    chave_incidente
+def obter_estado_incidente(
+    chave
 ):
+
+    if chave not in incidentes_ativos:
+
+        incidentes_ativos[chave] = {
+
+            "frames_confirmados": 0,
+
+            "ativo": False,
+
+            "ultima_foto": None,
+
+            "ultimo_frame_detectado": None,
+        }
+
+    return incidentes_ativos[
+        chave
+    ]
+
+
+# ============================================================
+# PROCESSAR INCIDENTE
+# ============================================================
+
+def processar_incidente(
+    camera_id,
+    camera_nome,
+    ambiente,
+    matricula,
+    operador,
+    tipo_infracao,
+    severidade,
+    frame
+):
+
+    chave = criar_chave_incidente(
+        camera_id,
+        matricula,
+        tipo_infracao
+    )
+
+    estado = obter_estado_incidente(
+        chave
+    )
 
     agora = time.time()
 
-    intervalo = getattr(
+    frames_confirmacao = getattr(
+        config,
+        "FRAMES_CONFIRMACAO_INFRACAO",
+        5
+    )
+
+    cooldown = getattr(
         config,
         "INTERVALO_REPETICAO_INCIDENTE_SEGUNDOS",
         300
     )
 
-    ultimo = ultimos_incidentes.get(
-        chave_incidente
-    )
+    estado[
+        "frames_confirmados"
+    ] += 1
 
-    if ultimo is None:
+    estado[
+        "ultimo_frame_detectado"
+    ] = agora
 
-        ultimos_incidentes[
-            chave_incidente
+    # --------------------------------------------------------
+    # AINDA NÃO CONFIRMOU
+    # --------------------------------------------------------
+
+    if (
+        estado["frames_confirmados"]
+        < frames_confirmacao
+    ):
+
+        return False
+
+    # --------------------------------------------------------
+    # PRIMEIRA CONFIRMAÇÃO
+    # --------------------------------------------------------
+
+    if not estado["ativo"]:
+
+        estado[
+            "ativo"
+        ] = True
+
+        estado[
+            "ultima_foto"
         ] = agora
+
+        registrar_incidente_csv(
+            severidade,
+            tipo_infracao,
+            matricula,
+            operador,
+            frame,
+            camera_id=camera_id,
+            camera_nome=camera_nome,
+            ambiente=ambiente,
+        )
 
         return True
 
-    if agora - ultimo >= intervalo:
+    # --------------------------------------------------------
+    # INCIDENTE CONTINUA
+    # --------------------------------------------------------
 
-        ultimos_incidentes[
-            chave_incidente
+    ultima_foto = estado.get(
+        "ultima_foto"
+    )
+
+    if ultima_foto is None:
+
+        estado[
+            "ultima_foto"
+        ] = agora
+
+        return False
+
+    tempo_decorrido = (
+        agora - ultima_foto
+    )
+
+    # --------------------------------------------------------
+    # 5 MINUTOS
+    # --------------------------------------------------------
+
+    if tempo_decorrido >= cooldown:
+
+        registrar_incidente_csv(
+            severidade,
+            tipo_infracao,
+            matricula,
+            operador,
+            frame,
+            camera_id=camera_id,
+            camera_nome=camera_nome,
+            ambiente=ambiente,
+        )
+
+        estado[
+            "ultima_foto"
         ] = agora
 
         return True
@@ -330,155 +443,80 @@ def pode_registrar_incidente(
 
 
 # ============================================================
+# RESETAR INCIDENTES QUE SUMIRAM
+# ============================================================
+
+def atualizar_incidentes_ausentes(
+    chaves_detectadas
+):
+
+    agora = time.time()
+
+    tempo_reset = getattr(
+        config,
+        "TEMPO_RESET_INCIDENTE_SEGUNDOS",
+        1.0
+    )
+
+    chaves_para_remover = []
+
+    for chave, estado in (
+        incidentes_ativos.items()
+    ):
+
+        if chave in chaves_detectadas:
+            continue
+
+        ultimo_frame = estado.get(
+            "ultimo_frame_detectado"
+        )
+
+        if ultimo_frame is None:
+
+            chaves_para_remover.append(
+                chave
+            )
+
+            continue
+
+        if (
+            agora - ultimo_frame
+            >= tempo_reset
+        ):
+
+            chaves_para_remover.append(
+                chave
+            )
+
+    for chave in chaves_para_remover:
+
+        incidentes_ativos.pop(
+            chave,
+            None
+        )
+
+
+# ============================================================
 # SEVERIDADE
 # ============================================================
 
-def calcular_nivel_severidade(
-    tem_pessoa_na_zona,
-    infracoes_detectadas,
-    fadiga_detectada,
-    matricula,
-    operador,
-    frame,
-    camera_id=None,
-    camera_nome=None,
-    ambiente=None,
-    epis_faltantes=None
+def definir_severidade(
+    tipo_infracao,
+    tem_pessoa_na_zona=False
 ):
 
     if (
-        len(infracoes_detectadas) == 0
-        and not fadiga_detectada
-        and not epis_faltantes
+        tipo_infracao == "Capacete"
+        and tem_pessoa_na_zona
     ):
 
-        severidade_atual = "NORMAL"
+        return "CRITICA"
 
-    elif (
-        tem_pessoa_na_zona
-        and (
-            "Without Helmet"
-            in infracoes_detectadas
-        )
-    ):
+    if tipo_infracao:
 
-        severidade_atual = "CRITICA"
+        return "ALTA"
 
-    elif (
-        len(infracoes_detectadas) > 0
-        or len(epis_faltantes or []) > 0
-        or fadiga_detectada
-    ):
-
-        severidade_atual = "ALTA"
-
-    else:
-
-        severidade_atual = "INFORMATIVA"
-
-    chave_camera = (
-        str(camera_id)
-        if camera_id is not None
-        else "global"
-    )
-
-    estado_anterior = estados_severidade.get(
-        chave_camera,
-        "NORMAL"
-    )
-
-    estados_severidade[
-        chave_camera
-    ] = severidade_atual
-
-    # --------------------------------------------------------
-    # NÃO HÁ INCIDENTE
-    # --------------------------------------------------------
-
-    if severidade_atual == "NORMAL":
-
-        return severidade_atual
-
-    # --------------------------------------------------------
-    # IDENTIFICA O TIPO DO INCIDENTE
-    # --------------------------------------------------------
-
-    partes_chave = []
-
-    if infracoes_detectadas:
-
-        partes_chave.extend(
-            sorted(infracoes_detectadas)
-        )
-
-    if epis_faltantes:
-
-        partes_chave.extend(
-            sorted(epis_faltantes)
-        )
-
-    if fadiga_detectada:
-
-        partes_chave.append(
-            "FADIGA_ERGONOMICA"
-        )
-
-    chave_incidente = (
-        f"{camera_id}|"
-        f"{matricula}|"
-        f"{'|'.join(partes_chave)}"
-    )
-
-    # --------------------------------------------------------
-    # REGISTRO
-    # --------------------------------------------------------
-
-    houve_mudanca = (
-        severidade_atual
-        != estado_anterior
-    )
-
-    deve_registrar = False
-
-    if houve_mudanca:
-
-        deve_registrar = True
-
-    elif pode_registrar_incidente(
-        chave_incidente
-    ):
-
-        deve_registrar = True
-
-    if deve_registrar:
-
-        registrar_incidente_csv(
-            severidade_atual,
-            infracoes_detectadas,
-            matricula,
-            operador,
-            frame,
-            camera_id=camera_id,
-            camera_nome=camera_nome,
-            ambiente=ambiente,
-            epis_faltantes=epis_faltantes,
-        )
-
-    # --------------------------------------------------------
-    # ALERTA
-    # --------------------------------------------------------
-
-    if (
-        houve_mudanca
-        and severidade_atual
-        in ["CRITICA", "ALTA"]
-    ):
-
-        disparar_alerta_proativo(
-            severidade_atual
-        )
-
-    return severidade_atual
+    return "NORMAL"
 
 
 # ============================================================
@@ -499,44 +537,47 @@ def processar_regras_situacionais(
     epis_obrigatorios=None
 ):
 
+    # ========================================================
+    # IMPORTANTE
+    #
+    # Se os EPIs ainda não foram configurados,
+    # nenhum EPI deve ser considerado obrigatório.
+    # ========================================================
+
+    if epis_obrigatorios is None:
+
+        epis_obrigatorios = []
+
     tem_pessoa_na_zona = False
 
     pontos_pes = []
 
     infracoes_detectadas = []
 
-    # --------------------------------------------------------
-    # EPIs OBRIGATÓRIOS
-    # --------------------------------------------------------
-
-    if epis_obrigatorios is None:
-
-        epis_obrigatorios = getattr(
-            config,
-            "EPIS_PADRAO",
-            [
-                "Capacete",
-                "Óculos",
-                "Máscara",
-                "Luvas",
-                "Protetor auricular",
-                "Colete",
-            ]
-        )
-
     mapa_ausencias = {
-        "Without Helmet": "Capacete",
-        "Without Glass": "Óculos",
-        "Without Mask": "Máscara",
-        "Without Glove": "Luvas",
+
+        "Without Helmet":
+            "Capacete",
+
+        "Without Glass":
+            "Óculos",
+
+        "Without Mask":
+            "Máscara",
+
+        "Without Glove":
+            "Luvas",
+
         "Without Ear Protectors":
             "Protetor auricular",
-        "Without Safety Vest": "Colete",
+
+        "Without Safety Vest":
+            "Colete",
     }
 
-    # --------------------------------------------------------
-    # DETECÇÃO
-    # --------------------------------------------------------
+    # ========================================================
+    # DETECÇÕES
+    # ========================================================
 
     for resultado in results:
 
@@ -553,9 +594,9 @@ def processar_regras_situacionais(
                 cls_id
             ]
 
-            # ----------------------------------------------
+            # =================================================
             # PESSOA
-            # ----------------------------------------------
+            # =================================================
 
             if label == "person":
 
@@ -565,7 +606,9 @@ def processar_regras_situacionais(
                 )
 
                 ponto_base = (
-                    int((x1 + x2) / 2),
+                    int(
+                        (x1 + x2) / 2
+                    ),
                     y2
                 )
 
@@ -583,27 +626,25 @@ def processar_regras_situacionais(
 
                     tem_pessoa_na_zona = True
 
-            # ----------------------------------------------
+            # =================================================
             # AUSÊNCIA DE EPI
-            # ----------------------------------------------
+            # =================================================
 
             if label in mapa_ausencias:
 
-                nome_epi = mapa_ausencias[
+                epi = mapa_ausencias[
                     label
                 ]
 
-                # Só considera infração se
-                # o EPI for obrigatório naquela câmera.
-                if nome_epi in epis_obrigatorios:
+                if epi in epis_obrigatorios:
 
                     infracoes_detectadas.append(
-                        label
+                        epi
                     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # REMOVE DUPLICADOS
-    # --------------------------------------------------------
+    # ========================================================
 
     infracoes_detectadas = list(
         dict.fromkeys(
@@ -611,26 +652,9 @@ def processar_regras_situacionais(
         )
     )
 
-    # --------------------------------------------------------
-    # EPI FALTANTE EM FORMATO HUMANO
-    # --------------------------------------------------------
-
-    epis_faltantes = []
-
-    for infracao in infracoes_detectadas:
-
-        nome_epi = mapa_ausencias.get(
-            infracao
-        )
-
-        if nome_epi:
-            epis_faltantes.append(
-                nome_epi
-            )
-
-    # --------------------------------------------------------
+    # ========================================================
     # ERGONOMIA
-    # --------------------------------------------------------
+    # ========================================================
 
     identificador_fadiga = (
         f"{camera_id}|{matricula}"
@@ -651,25 +675,74 @@ def processar_regras_situacionais(
             )
         )
 
-    # --------------------------------------------------------
-    # SEVERIDADE
-    # --------------------------------------------------------
+    if fadiga_detectada:
 
-    severidade = calcular_nivel_severidade(
-        tem_pessoa_na_zona,
-        infracoes_detectadas,
-        fadiga_detectada,
-        matricula,
-        operador,
-        frame,
-        camera_id=camera_id,
-        camera_nome=camera_nome,
-        ambiente=ambiente,
-        epis_faltantes=epis_faltantes,
+        infracoes_detectadas.append(
+            "FADIGA_ERGONOMICA"
+        )
+
+    # ========================================================
+    # PROCESSAMENTO INDIVIDUAL
+    #
+    # Cada infração possui seu próprio incidente.
+    # ========================================================
+
+    chaves_detectadas = set()
+
+    severidade_geral = "NORMAL"
+
+    for tipo_infracao in (
+        infracoes_detectadas
+    ):
+
+        severidade = definir_severidade(
+            tipo_infracao,
+            tem_pessoa_na_zona
+        )
+
+        if severidade == "CRITICA":
+
+            severidade_geral = "CRITICA"
+
+        elif (
+            severidade == "ALTA"
+            and severidade_geral
+            != "CRITICA"
+        ):
+
+            severidade_geral = "ALTA"
+
+        chave = criar_chave_incidente(
+            camera_id,
+            matricula,
+            tipo_infracao
+        )
+
+        chaves_detectadas.add(
+            chave
+        )
+
+        processar_incidente(
+            camera_id,
+            camera_nome,
+            ambiente,
+            matricula,
+            operador,
+            tipo_infracao,
+            severidade,
+            frame
+        )
+
+    # ========================================================
+    # INCIDENTES QUE DESAPARECERAM
+    # ========================================================
+
+    atualizar_incidentes_ausentes(
+        chaves_detectadas
     )
 
     return (
-        severidade,
+        severidade_geral,
         pontos_pes,
         infracoes_detectadas
     )

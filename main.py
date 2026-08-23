@@ -1,598 +1,1805 @@
 import cv2
+import math
 import os
-import csv
-import torch
 import numpy as np
+import torch
 
 from ultralytics import YOLO
-from deepface import DeepFace
 
 import config
-from decision_engine import processar_regras_situacionais
+
+from analise_ambiente import (
+    analisar_frame,
+    desenhar_objetos
+)
+
+from objetos_globais import (
+    criar_objetos_globais,
+    preparar_objetos_para_salvar
+)
+
+
+# ============================================================
+# ESTADO
+# ============================================================
+
+estado_sistema = (
+    config.obter_estado_inicial()
+)
 
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-LARGURA_SIDEBAR = 330
-
-CAMERA_ID = 0
-
-
-# ============================================================
-# CLASSES DE EPI
-# ============================================================
-
-EQUIPAMENTOS_AUSENCIA = {
-    "Without Helmet": "Capacete",
-    "Without Glass": "Óculos",
-    "Without Mask": "Máscara",
-    "Without Glove": "Luvas",
-    "Without Ear Protectors": "Protetor auricular",
-    "Without Safety Vest": "Colete"
-}
-
-
-EQUIPAMENTOS_PRESENCA = {
-    "Helmet": "Capacete",
-    "Glass": "Óculos",
-    "Mask": "Máscara",
-    "Glove": "Luvas",
-    "Ear Protectors": "Protetor auricular",
-    "Safety Vest": "Colete"
-}
-
-
-# ============================================================
-# CONFIGURAÇÃO DA CÂMERA
-# ============================================================
-
-def obter_configuracao_camera(camera_id):
-
-    cameras = getattr(
-        config,
-        "CAMERAS",
-        None
-    )
-
-    # --------------------------------------------------------
-    # NOVA CONFIGURAÇÃO
-    # --------------------------------------------------------
-
-    if isinstance(cameras, dict):
-
-        camera = cameras.get(
-            camera_id
-        )
-
-        if camera is not None:
-
-            return {
-                "id": camera_id,
-                "nome": camera.get(
-                    "nome",
-                    f"Câmera {camera_id + 1}"
-                ),
-                "ambiente": camera.get(
-                    "ambiente",
-                    "Ambiente não definido"
-                ),
-                "fonte": camera.get(
-                    "fonte",
-                    camera_id
-                ),
-                "ativa": camera.get(
-                    "ativa",
-                    True
-                ),
-                "epis_obrigatorios": camera.get(
-                    "epis_obrigatorios",
-                    getattr(
-                        config,
-                        "EPIS_PADRAO",
-                        list(
-                            EQUIPAMENTOS_AUSENCIA.values()
-                        )
-                    )
-                ),
-                "zona_risco": camera.get(
-                    "zona_risco",
-                    getattr(
-                        config,
-                        "PONTOS_ZONA_RISCO",
-                        None
-                    )
-                )
-            }
-
-    # --------------------------------------------------------
-    # COMPATIBILIDADE COM CONFIG ANTIGO
-    # --------------------------------------------------------
-
-    return {
-        "id": camera_id,
-        "nome": f"Câmera {camera_id + 1}",
-        "ambiente": "Ambiente principal",
-        "fonte": camera_id,
-        "ativa": True,
-        "epis_obrigatorios": getattr(
-            config,
-            "EPIS_PADRAO",
-            list(
-                EQUIPAMENTOS_AUSENCIA.values()
-            )
-        ),
-        "zona_risco": getattr(
-            config,
-            "PONTOS_ZONA_RISCO",
-            None
-        )
-    }
-
-
-CONFIG_CAMERA = obter_configuracao_camera(
-    CAMERA_ID
+MAX_INDICES_CAMERA = getattr(
+    config,
+    "MAX_CAMERAS",
+    66
 )
 
+LIMITE_FALHAS_CAPTURA = 10
+
+INTERVALO_ANALISE_AMBIENTE = 10
+
+FRAMES_ANTES_CONFIGURACAO = 30
+
 
 # ============================================================
-# DADOS BIOMÉTRICOS
+# INTERFACE DE CONFIGURAÇÃO
 # ============================================================
 
-def carregar_dados_biometricos():
+NOME_JANELA_CONFIG = (
+    "Configuracao Inicial"
+)
 
-    arquivo_csv = os.path.join(
-        "banco_biometria",
-        "dados_operadores.csv"
+clique_mouse = None
+
+
+# ============================================================
+# EPI - CLASSES
+# ============================================================
+
+EPIS_PRESENCA = {
+
+    "Helmet":
+        "Capacete",
+
+    "Glass":
+        "Óculos",
+
+    "Mask":
+        "Máscara",
+
+    "Glove":
+        "Luvas",
+
+    "Ear Protectors":
+        "Protetor auricular",
+
+    "Safety Vest":
+        "Colete",
+}
+
+
+EPIS_AUSENCIA = {
+
+    "Without Helmet":
+        "Capacete",
+
+    "Without Glass":
+        "Óculos",
+
+    "Without Mask":
+        "Máscara",
+
+    "Without Glove":
+        "Luvas",
+
+    "Without Ear Protectors":
+        "Protetor auricular",
+
+    "Without Safety Vest":
+        "Colete",
+}
+
+
+# ============================================================
+# MODELO DE EPI
+# ============================================================
+
+modelo_epi = None
+
+
+def carregar_modelo_epi():
+
+    global modelo_epi
+
+    if modelo_epi is not None:
+
+        return modelo_epi
+
+    caminho = getattr(
+        config,
+        "PATH_MODELO",
+        "best.pt"
     )
 
-    operadores = {}
-
     if not os.path.exists(
-        arquivo_csv
+        caminho
     ):
-        return operadores
+
+        print()
+        print(
+            f"⚠️ Modelo de EPI não encontrado: "
+            f"{caminho}"
+        )
+
+        return None
 
     try:
 
-        with open(
-            arquivo_csv,
-            mode="r",
-            encoding="utf-8"
-        ) as arquivo:
+        modelo_epi = YOLO(
+            caminho
+        )
 
-            reader = csv.DictReader(
-                arquivo
-            )
+        print()
+        print(
+            "=========================================="
+        )
+        print(
+            " MODELO DE EPI CARREGADO"
+        )
+        print(
+            "=========================================="
+        )
 
-            for linha in reader:
+        print(
+            caminho
+        )
 
-                matricula = str(
-                    linha.get(
-                        "Matricula",
-                        ""
-                    )
-                ).strip()
+        print(
+            "=========================================="
+        )
+        print()
 
-                nome = str(
-                    linha.get(
-                        "Nome",
-                        ""
-                    )
-                ).strip()
-
-                cargo = str(
-                    linha.get(
-                        "Cargo",
-                        ""
-                    )
-                ).strip()
-
-                if not matricula:
-                    continue
-
-                operadores[matricula] = {
-                    "matricula": matricula,
-                    "nome": nome,
-                    "cargo": cargo
-                }
+        return modelo_epi
 
     except Exception as erro:
 
         print(
-            f"⚠️ Erro ao carregar biometria: {erro}"
+            f"❌ Erro ao carregar modelo de EPI: "
+            f"{erro}"
         )
 
-    return operadores
+        modelo_epi = None
 
-
-DADOS_OPERADORES = carregar_dados_biometricos()
-
-
-# ============================================================
-# FORMATA OPERADOR PARA SIDEBAR
-# ============================================================
-
-def formatar_operador(
-    dados_operador
-):
-
-    if not dados_operador:
-        return "Rosto Desconhecido"
-
-    nome = dados_operador.get(
-        "nome",
-        "Desconhecido"
-    )
-
-    cargo = dados_operador.get(
-        "cargo",
-        ""
-    )
-
-    if cargo:
-
-        return f"{nome} ({cargo})"
-
-    return nome
-
-
-# ============================================================
-# CARREGAMENTO DOS MODELOS
-# ============================================================
-
-if os.path.exists(
-    config.PATH_MODELO
-):
-
-    model_epi = YOLO(
-        config.PATH_MODELO
-    )
-
-    print(
-        f"✅ Modelo de EPIs carregado: "
-        f"{config.PATH_MODELO}"
-    )
-
-else:
-
-    model_epi = YOLO(
-        "yolov8n.pt"
-    )
-
-    print(
-        "⚠️ best.pt não encontrado. "
-        "Usando yolov8n.pt."
-    )
-
-
-# ------------------------------------------------------------
-# POSE
-# ------------------------------------------------------------
-
-model_pose = YOLO(
-    "yolov8n-pose.pt"
-)
+        return None
 
 
 # ============================================================
 # DEVICE
 # ============================================================
 
-device = (
-    "0"
-    if torch.cuda.is_available()
-    else (
-        "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
-)
+if torch.cuda.is_available():
 
+    DEVICE = 0
 
-model_epi.to(device)
-model_pose.to(device)
+else:
 
-
-print(
-    f"🖥️ Device utilizado: {device}"
-)
+    DEVICE = "cpu"
 
 
 # ============================================================
-# CLASSES DO MODELO
+# EVENTO DO MOUSE
 # ============================================================
 
-print()
-print(
-    "=============================="
-)
-print(
-    "CLASSES DO MODELO DE EPI"
-)
-print(
-    "=============================="
-)
-
-try:
-
-    print(
-        model_epi.names
-    )
-
-except Exception:
-
-    print(
-        "Não foi possível listar as classes."
-    )
-
-print(
-    "=============================="
-)
-print()
-
-
-# ============================================================
-# CÂMERA
-# ============================================================
-
-if not CONFIG_CAMERA["ativa"]:
-
-    print(
-        f"❌ A câmera {CAMERA_ID} "
-        "está desativada no config."
-    )
-
-    raise SystemExit
-
-
-fonte_camera = CONFIG_CAMERA[
-    "fonte"
-]
-
-
-cap = cv2.VideoCapture(
-    fonte_camera,
-    cv2.CAP_DSHOW
-)
-
-
-if not cap.isOpened():
-
-    print(
-        f"❌ Não foi possível abrir "
-        f"a câmera {fonte_camera}."
-    )
-
-    raise SystemExit
-
-
-cap.set(
-    cv2.CAP_PROP_FRAME_WIDTH,
-    config.LARGURA_CAM
-)
-
-cap.set(
-    cv2.CAP_PROP_FRAME_HEIGHT,
-    config.ALTURA_CAM
-)
-
-
-print(
-    f"📷 Câmera ativa: "
-    f"{CONFIG_CAMERA['nome']}"
-)
-
-print(
-    f"🏭 Ambiente: "
-    f"{CONFIG_CAMERA['ambiente']}"
-)
-
-
-# ============================================================
-# VARIÁVEIS
-# ============================================================
-
-ultimo_operador_identificado = (
-    "Buscando Biometria..."
-)
-
-dados_operador_atual = None
-
-matricula_atual = "0000"
-
-contador_frames = 0
-
-
-# ============================================================
-# ANALISAR STATUS DOS EPIs
-# ============================================================
-
-def analisar_status_epis(
-    results_epi,
-    epis_obrigatorios
+def evento_mouse(
+    evento,
+    x,
+    y,
+    flags,
+    parametro
 ):
 
-    status = {}
+    global clique_mouse
 
-    # --------------------------------------------------------
-    # SOMENTE EPIs OBRIGATÓRIOS
-    # --------------------------------------------------------
+    if evento == cv2.EVENT_LBUTTONDOWN:
 
-    for nome in epis_obrigatorios:
+        clique_mouse = (
+            x,
+            y
+        )
 
-        status[nome] = {
-            "status": "NÃO DETECTADO",
-            "cor": (0, 200, 255)
-        }
 
-    classes_detectadas = set()
+# ============================================================
+# VERIFICAR CLIQUE
+# ============================================================
 
-    # --------------------------------------------------------
-    # CLASSES DETECTADAS
-    # --------------------------------------------------------
+def ponto_dentro(
+    ponto,
+    caixa
+):
 
-    for resultado in results_epi:
+    if ponto is None:
+
+        return False
+
+    x, y = ponto
+
+    x1, y1, x2, y2 = caixa
+
+    return (
+        x1 <= x <= x2
+        and
+        y1 <= y <= y2
+    )
+
+
+# ============================================================
+# DESENHAR BOTÃO
+# ============================================================
+
+def desenhar_botao(
+    tela,
+    texto,
+    caixa,
+    selecionado=False
+):
+
+    x1, y1, x2, y2 = caixa
+
+    if selecionado:
+
+        cor = (
+            50,
+            125,
+            60
+        )
+
+    else:
+
+        cor = (
+            55,
+            55,
+            55
+        )
+
+    cv2.rectangle(
+        tela,
+        (x1, y1),
+        (x2, y2),
+        cor,
+        -1
+    )
+
+    cv2.rectangle(
+        tela,
+        (x1, y1),
+        (x2, y2),
+        (140, 140, 140),
+        1
+    )
+
+    cv2.putText(
+        tela,
+        texto,
+        (
+            x1 + 12,
+            y1 + 27
+        ),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.50,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA
+    )
+
+
+# ============================================================
+# CLASSE DA CÂMERA
+# ============================================================
+
+class CameraSistema:
+
+    def __init__(
+        self,
+        camera_id,
+        fonte=None,
+        nome=None
+    ):
+
+        self.camera_id = camera_id
+
+        self.fonte = (
+            camera_id
+            if fonte is None
+            else fonte
+        )
+
+        self.nome = (
+            nome
+            if nome
+            else f"Camera {camera_id + 1:02d}"
+        )
+
+        self.cap = None
+
+        self.ativa = False
+
+        self.ultimo_frame = None
+
+        self.falhas_consecutivas = 0
+
+        self.objetos = []
+
+        self.total_objetos = 0
+
+
+    # ========================================================
+    # ABRIR
+    # ========================================================
+
+    def abrir(self):
+
+        self.liberar()
+
+        try:
+
+            if isinstance(
+                self.fonte,
+                int
+            ):
+
+                self.cap = cv2.VideoCapture(
+                    self.fonte,
+                    cv2.CAP_DSHOW
+                )
+
+            else:
+
+                self.cap = cv2.VideoCapture(
+                    self.fonte
+                )
+
+        except Exception:
+
+            self.cap = None
+
+            return False
+
+        if (
+            self.cap is None
+            or not self.cap.isOpened()
+        ):
+
+            if self.cap is not None:
+
+                self.cap.release()
+
+            self.cap = None
+
+            return False
+
+        self.cap.set(
+            cv2.CAP_PROP_FRAME_WIDTH,
+            getattr(
+                config,
+                "LARGURA_CAM",
+                640
+            )
+        )
+
+        self.cap.set(
+            cv2.CAP_PROP_FRAME_HEIGHT,
+            getattr(
+                config,
+                "ALTURA_CAM",
+                480
+            )
+        )
+
+        sucesso, frame = (
+            self.cap.read()
+        )
+
+        if (
+            not sucesso
+            or frame is None
+            or frame.size == 0
+        ):
+
+            self.cap.release()
+
+            self.cap = None
+
+            return False
+
+        self.ultimo_frame = frame
+
+        self.ativa = True
+
+        self.falhas_consecutivas = 0
+
+        print(
+            f"✅ {self.nome} encontrada "
+            f"(indice {self.camera_id})"
+        )
+
+        return True
+
+
+    # ========================================================
+    # GRAB
+    # ========================================================
+
+    def grab(self):
+
+        if (
+            self.cap is None
+            or not self.ativa
+        ):
+
+            return False
+
+        try:
+
+            sucesso = self.cap.grab()
+
+        except Exception:
+
+            sucesso = False
+
+        if not sucesso:
+
+            self.falhas_consecutivas += 1
+
+        return sucesso
+
+
+    # ========================================================
+    # RETRIEVE
+    # ========================================================
+
+    def retrieve(self):
+
+        if (
+            self.cap is None
+            or not self.ativa
+        ):
+
+            return None
+
+        try:
+
+            sucesso, frame = (
+                self.cap.retrieve()
+            )
+
+        except Exception:
+
+            sucesso = False
+            frame = None
+
+        if (
+            not sucesso
+            or frame is None
+            or frame.size == 0
+        ):
+
+            self.falhas_consecutivas += 1
+
+            return None
+
+        self.falhas_consecutivas = 0
+
+        self.ultimo_frame = frame
+
+        return frame
+
+
+    # ========================================================
+    # PERDEU CONEXÃO
+    # ========================================================
+
+    def perdeu_conexao(self):
+
+        return (
+            self.falhas_consecutivas
+            >= LIMITE_FALHAS_CAPTURA
+        )
+
+
+    # ========================================================
+    # LIBERAR
+    # ========================================================
+
+    def liberar(self):
+
+        if self.cap is not None:
+
+            try:
+
+                self.cap.release()
+
+            except Exception:
+
+                pass
+
+        self.cap = None
+
+        self.ativa = False
+
+
+# ============================================================
+# DESCOBRIR CÂMERAS
+# ============================================================
+
+def descobrir_cameras():
+
+    cameras = {}
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " PROCURANDO CAMERAS DISPONIVEIS"
+    )
+    print(
+        "=========================================="
+    )
+
+    for camera_id in range(
+        MAX_INDICES_CAMERA
+    ):
+
+        dados = getattr(
+            config,
+            "CAMERAS",
+            {}
+        ).get(
+            camera_id,
+            {}
+        )
+
+        fonte = dados.get(
+            "fonte",
+            camera_id
+        )
+
+        nome = dados.get(
+            "nome",
+            f"Camera {camera_id + 1:02d}"
+        )
+
+        camera = CameraSistema(
+            camera_id,
+            fonte,
+            nome
+        )
+
+        if camera.abrir():
+
+            cameras[
+                camera_id
+            ] = camera
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        f"Total de cameras encontradas: "
+        f"{len(cameras)}"
+    )
+
+    print(
+        "=========================================="
+    )
+    print()
+
+    return cameras
+
+
+# ============================================================
+# CAPTURA SINCRONIZADA
+# ============================================================
+
+def capturar_frames_sincronizados(
+    cameras
+):
+
+    for camera in cameras.values():
+
+        if camera.ativa:
+
+            camera.grab()
+
+    frames = []
+
+    remover = []
+
+    for (
+        camera_id,
+        camera
+    ) in list(
+        cameras.items()
+    ):
+
+        frame = camera.retrieve()
+
+        if frame is None:
+
+            if camera.perdeu_conexao():
+
+                remover.append(
+                    camera_id
+                )
+
+                continue
+
+            if camera.ultimo_frame is not None:
+
+                frame = (
+                    camera.ultimo_frame.copy()
+                )
+
+            else:
+
+                continue
+
+        frames.append(
+            (
+                camera,
+                frame
+            )
+        )
+
+    for camera_id in remover:
+
+        camera = cameras.get(
+            camera_id
+        )
+
+        if camera:
+
+            print(
+                f"⚠️ {camera.nome} "
+                "desconectada."
+            )
+
+            camera.liberar()
+
+        cameras.pop(
+            camera_id,
+            None
+        )
+
+    return frames
+
+
+# ============================================================
+# ANALISAR AMBIENTE
+# ============================================================
+
+def analisar_ambiente_cameras(
+    frames
+):
+
+    resultado = []
+
+    for (
+        camera,
+        frame
+    ) in frames:
+
+        try:
+
+            objetos = analisar_frame(
+                frame,
+                camera.camera_id
+            )
+
+        except Exception as erro:
+
+            print(
+                f"Erro analisando "
+                f"{camera.nome}: {erro}"
+            )
+
+            objetos = []
+
+        camera.objetos = objetos
+
+        camera.total_objetos = len(
+            objetos
+        )
+
+        frame_visual = (
+            desenhar_objetos(
+                frame,
+                objetos
+            )
+        )
+
+        resultado.append(
+            (
+                camera,
+                frame_visual
+            )
+        )
+
+    return resultado
+
+
+# ============================================================
+# DESENHAR OBJETOS EXISTENTES
+# ============================================================
+
+def desenhar_objetos_existentes(
+    frames
+):
+
+    resultado = []
+
+    for (
+        camera,
+        frame
+    ) in frames:
+
+        frame_visual = (
+            desenhar_objetos(
+                frame,
+                camera.objetos
+            )
+        )
+
+        resultado.append(
+            (
+                camera,
+                frame_visual
+            )
+        )
+
+    return resultado
+
+
+# ============================================================
+# SELECIONAR MAQUINÁRIOS
+# ============================================================
+
+def selecionar_maquinarios(
+    objetos_globais
+):
+
+    global clique_mouse
+
+    clique_mouse = None
+
+    selecionados = set()
+
+    cv2.namedWindow(
+        NOME_JANELA_CONFIG
+    )
+
+    cv2.setMouseCallback(
+        NOME_JANELA_CONFIG,
+        evento_mouse
+    )
+
+    while True:
+
+        altura = max(
+            550,
+            180
+            + len(
+                objetos_globais
+            ) * 55
+        )
+
+        altura = min(
+            altura,
+            850
+        )
+
+        tela = np.zeros(
+            (
+                altura,
+                760,
+                3
+            ),
+            dtype=np.uint8
+        )
+
+        tela[:] = (
+            28,
+            28,
+            28
+        )
+
+        cv2.putText(
+            tela,
+            "ANALISE DO AMBIENTE",
+            (30, 42),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            tela,
+            "Quais objetos sao maquinarios?",
+            (30, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.56,
+            (0, 220, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+        botoes = {}
+
+        y = 110
+
+        for (
+            objeto_id,
+            objeto
+        ) in objetos_globais.items():
+
+            cameras_texto = ", ".join(
+                [
+                    f"CAM {camera + 1:02d}"
+                    for camera
+                    in objeto.get(
+                        "cameras",
+                        []
+                    )
+                ]
+            )
+
+            texto = (
+                f"{objeto['nome']} "
+                f"({cameras_texto})"
+            )
+
+            caixa = (
+                30,
+                y,
+                720,
+                y + 42
+            )
+
+            botoes[
+                objeto_id
+            ] = caixa
+
+            desenhar_botao(
+                tela,
+                texto,
+                caixa,
+                objeto_id
+                in selecionados
+            )
+
+            y += 52
+
+            if y > altura - 100:
+
+                break
+
+        confirmar = (
+            500,
+            altura - 65,
+            720,
+            altura - 20
+        )
+
+        desenhar_botao(
+            tela,
+            "CONFIRMAR",
+            confirmar,
+            True
+        )
+
+        cv2.imshow(
+            NOME_JANELA_CONFIG,
+            tela
+        )
+
+        tecla = (
+            cv2.waitKey(20)
+            & 0xFF
+        )
+
+        if tecla == ord("q"):
+
+            return None
+
+        if clique_mouse is None:
+
+            continue
+
+        clique = clique_mouse
+
+        clique_mouse = None
+
+        for (
+            objeto_id,
+            caixa
+        ) in botoes.items():
+
+            if ponto_dentro(
+                clique,
+                caixa
+            ):
+
+                if (
+                    objeto_id
+                    in selecionados
+                ):
+
+                    selecionados.remove(
+                        objeto_id
+                    )
+
+                else:
+
+                    selecionados.add(
+                        objeto_id
+                    )
+
+        if ponto_dentro(
+            clique,
+            confirmar
+        ):
+
+            break
+
+    for (
+        objeto_id,
+        objeto
+    ) in objetos_globais.items():
+
+        objeto[
+            "maquinario"
+        ] = (
+            objeto_id
+            in selecionados
+        )
+
+    return objetos_globais
+
+
+# ============================================================
+# SELECIONAR EPIs
+# ============================================================
+
+def selecionar_epis():
+
+    global clique_mouse
+
+    clique_mouse = None
+
+    selecionados = set()
+
+    epis = getattr(
+        config,
+        "EPIS_DISPONIVEIS",
+        []
+    )
+
+    while True:
+
+        tela = np.zeros(
+            (
+                610,
+                760,
+                3
+            ),
+            dtype=np.uint8
+        )
+
+        tela[:] = (
+            28,
+            28,
+            28
+        )
+
+        cv2.putText(
+            tela,
+            "CONFIGURACAO DE EPIs",
+            (30, 42),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            tela,
+            "Quais EPIs sao obrigatorios?",
+            (30, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.56,
+            (0, 220, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+        botoes = {}
+
+        y = 120
+
+        for epi in epis:
+
+            caixa = (
+                30,
+                y,
+                720,
+                y + 45
+            )
+
+            botoes[
+                epi
+            ] = caixa
+
+            if epi in selecionados:
+
+                prefixo = "[X]"
+
+            else:
+
+                prefixo = "[ ]"
+
+            desenhar_botao(
+                tela,
+                f"{prefixo}  {epi}",
+                caixa,
+                epi in selecionados
+            )
+
+            y += 58
+
+        confirmar = (
+            500,
+            535,
+            720,
+            580
+        )
+
+        desenhar_botao(
+            tela,
+            "CONFIRMAR",
+            confirmar,
+            True
+        )
+
+        cv2.imshow(
+            NOME_JANELA_CONFIG,
+            tela
+        )
+
+        tecla = (
+            cv2.waitKey(20)
+            & 0xFF
+        )
+
+        if tecla == ord("q"):
+
+            return None
+
+        if clique_mouse is None:
+
+            continue
+
+        clique = clique_mouse
+
+        clique_mouse = None
+
+        for (
+            epi,
+            caixa
+        ) in botoes.items():
+
+            if ponto_dentro(
+                clique,
+                caixa
+            ):
+
+                if epi in selecionados:
+
+                    selecionados.remove(
+                        epi
+                    )
+
+                else:
+
+                    selecionados.add(
+                        epi
+                    )
+
+        if ponto_dentro(
+            clique,
+            confirmar
+        ):
+
+            break
+
+    return list(
+        selecionados
+    )
+
+
+# ============================================================
+# CONFIGURAR AMBIENTE
+# ============================================================
+
+def configurar_ambiente(
+    frames_originais
+):
+
+    global estado_sistema
+
+    print()
+    print(
+        "Agrupando objetos entre as cameras..."
+    )
+
+    objetos_globais = (
+        criar_objetos_globais(
+            frames_originais
+        )
+    )
+
+    if not objetos_globais:
+
+        print(
+            "⚠️ Nenhum objeto detectado."
+        )
+
+        return False
+
+    print(
+        f"Objetos globais: "
+        f"{len(objetos_globais)}"
+    )
+
+    # ========================================================
+    # MAQUINÁRIOS
+    # ========================================================
+
+    objetos_globais = (
+        selecionar_maquinarios(
+            objetos_globais
+        )
+    )
+
+    if objetos_globais is None:
+
+        return False
+
+    objetos_salvar = (
+        preparar_objetos_para_salvar(
+            objetos_globais
+        )
+    )
+
+    if not config.salvar_configuracao_ambiente(
+        objetos_salvar
+    ):
+
+        print(
+            "❌ Erro ao salvar ambiente."
+        )
+
+        return False
+
+    config.AMBIENTE_CALIBRADO = True
+
+    config.OBJETOS_GLOBAIS = (
+        objetos_salvar
+    )
+
+    # ========================================================
+    # EPIs
+    # ========================================================
+
+    estado_sistema = (
+        config.ESTADO_CONFIGURACAO_EPI
+    )
+
+    epis = selecionar_epis()
+
+    if epis is None:
+
+        return False
+
+    if not config.salvar_configuracao_epis(
+        epis
+    ):
+
+        print(
+            "❌ Erro ao salvar EPIs."
+        )
+
+        return False
+
+    config.EPIS_CONFIGURADOS = True
+
+    config.EPIS_OBRIGATORIOS = epis
+
+    # ========================================================
+    # MONITORAMENTO
+    # ========================================================
+
+    estado_sistema = (
+        config.ESTADO_MONITORAMENTO
+    )
+
+    carregar_modelo_epi()
+
+    try:
+
+        cv2.destroyWindow(
+            NOME_JANELA_CONFIG
+        )
+
+    except Exception:
+
+        pass
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " CONFIGURACAO CONCLUIDA"
+    )
+    print(
+        "=========================================="
+    )
+
+    print(
+        f"EPIs obrigatorios: "
+        f"{epis}"
+    )
+
+    print(
+        "Estado: MONITORAMENTO"
+    )
+
+    print(
+        "=========================================="
+    )
+    print()
+
+    return True
+
+
+# ============================================================
+# ANALISAR EPIs EM UM FRAME
+# ============================================================
+
+def analisar_epis_frame(
+    frame
+):
+
+    obrigatorios = getattr(
+        config,
+        "EPIS_OBRIGATORIOS",
+        []
+    )
+
+    status = {
+
+        epi: False
+
+        for epi in obrigatorios
+    }
+
+    if not obrigatorios:
+
+        return status
+
+    modelo = carregar_modelo_epi()
+
+    if modelo is None:
+
+        return status
+
+    try:
+
+        resultados = modelo.predict(
+            frame,
+            conf=getattr(
+                config,
+                "CONFIDENCIA_MINIMA",
+                0.5
+            ),
+            imgsz=getattr(
+                config,
+                "TAMANHO_IMAGEM",
+                640
+            ),
+            device=DEVICE,
+            verbose=False
+        )
+
+    except Exception as erro:
+
+        print(
+            f"⚠️ Erro na análise de EPI: "
+            f"{erro}"
+        )
+
+        return status
+
+    classes = set()
+
+    for resultado in resultados:
 
         if resultado.boxes is None:
+
             continue
 
         for box in resultado.boxes:
 
-            cls_id = int(
+            classe_id = int(
                 box.cls[0]
             )
 
-            label = resultado.names[
-                cls_id
+            nome = resultado.names[
+                classe_id
             ]
 
-            classes_detectadas.add(
-                label
+            classes.add(
+                nome
             )
 
-    # --------------------------------------------------------
-    # ANALISA CADA EPI
-    # --------------------------------------------------------
-
-    for classe_ausencia, nome in (
-        EQUIPAMENTOS_AUSENCIA.items()
-    ):
-
-        if nome not in epis_obrigatorios:
-            continue
+    for epi in obrigatorios:
 
         classe_presenca = None
 
-        for classe, nome_presenca in (
-            EQUIPAMENTOS_PRESENCA.items()
-        ):
+        classe_ausencia = None
 
-            if nome_presenca == nome:
+        for (
+            classe,
+            nome
+        ) in EPIS_PRESENCA.items():
+
+            if nome == epi:
 
                 classe_presenca = classe
 
                 break
 
-        # ----------------------------------------------------
-        # AUSÊNCIA
-        # ----------------------------------------------------
+        for (
+            classe,
+            nome
+        ) in EPIS_AUSENCIA.items():
 
-        if classe_ausencia in classes_detectadas:
+            if nome == epi:
 
-            status[nome] = {
-                "status": "FALTANTE",
-                "cor": (0, 0, 255)
-            }
+                classe_ausencia = classe
 
-        # ----------------------------------------------------
-        # PRESENÇA
-        # ----------------------------------------------------
+                break
+
+        # Ausência explícita tem prioridade.
+        if (
+            classe_ausencia is not None
+            and classe_ausencia in classes
+        ):
+
+            status[
+                epi
+            ] = False
 
         elif (
             classe_presenca is not None
-            and classe_presenca
-            in classes_detectadas
+            and classe_presenca in classes
         ):
 
-            status[nome] = {
-                "status": "OK",
-                "cor": (0, 200, 0)
-            }
-
-        # ----------------------------------------------------
-        # SEM INFORMAÇÃO
-        # ----------------------------------------------------
+            status[
+                epi
+            ] = True
 
         else:
 
-            status[nome] = {
-                "status": "NÃO DETECTADO",
-                "cor": (0, 200, 255)
-            }
+            status[
+                epi
+            ] = False
 
     return status
 
 
 # ============================================================
-# DESENHAR SIDEBAR
+# ANALISAR EPIs EM TODAS AS CÂMERAS
 # ============================================================
 
-def desenhar_sidebar(
-    frame,
-    status_epis,
-    operador,
-    severidade
+def analisar_epis_cameras(
+    frames
 ):
 
-    altura = frame.shape[0]
+    obrigatorios = getattr(
+        config,
+        "EPIS_OBRIGATORIOS",
+        []
+    )
 
-    sidebar = np.zeros(
+    # --------------------------------------------------------
+    # Guarda presença e ausência por todas as câmeras.
+    # --------------------------------------------------------
+
+    encontrou_presenca = {
+
+        epi: False
+        for epi in obrigatorios
+    }
+
+    encontrou_ausencia = {
+
+        epi: False
+        for epi in obrigatorios
+    }
+
+    modelo = carregar_modelo_epi()
+
+    if (
+        modelo is None
+        or not frames
+    ):
+
+        return {
+
+            epi: False
+            for epi in obrigatorios
+        }
+
+    for (
+        camera,
+        frame
+    ) in frames:
+
+        try:
+
+            resultados = modelo.predict(
+                frame,
+                conf=getattr(
+                    config,
+                    "CONFIDENCIA_MINIMA",
+                    0.5
+                ),
+                imgsz=getattr(
+                    config,
+                    "TAMANHO_IMAGEM",
+                    640
+                ),
+                device=DEVICE,
+                verbose=False
+            )
+
+        except Exception as erro:
+
+            print(
+                f"⚠️ Erro EPI "
+                f"{camera.nome}: "
+                f"{erro}"
+            )
+
+            continue
+
+        classes = set()
+
+        for resultado in resultados:
+
+            if resultado.boxes is None:
+
+                continue
+
+            for box in resultado.boxes:
+
+                classe_id = int(
+                    box.cls[0]
+                )
+
+                nome_classe = (
+                    resultado.names[
+                        classe_id
+                    ]
+                )
+
+                classes.add(
+                    nome_classe
+                )
+
+        for epi in obrigatorios:
+
+            for (
+                classe,
+                nome
+            ) in EPIS_PRESENCA.items():
+
+                if (
+                    nome == epi
+                    and classe in classes
+                ):
+
+                    encontrou_presenca[
+                        epi
+                    ] = True
+
+            for (
+                classe,
+                nome
+            ) in EPIS_AUSENCIA.items():
+
+                if (
+                    nome == epi
+                    and classe in classes
+                ):
+
+                    encontrou_ausencia[
+                        epi
+                    ] = True
+
+    status = {}
+
+    for epi in obrigatorios:
+
+        # Ausência explícita tem prioridade.
+        if encontrou_ausencia[
+            epi
+        ]:
+
+            status[
+                epi
+            ] = False
+
+        elif encontrou_presenca[
+            epi
+        ]:
+
+            status[
+                epi
+            ] = True
+
+        else:
+
+            status[
+                epi
+            ] = False
+
+    return status
+
+
+# ============================================================
+# CALCULAR SEVERIDADE
+# ============================================================
+
+def calcular_severidade_epi(
+    status_epis
+):
+
+    if not status_epis:
+
+        return "NORMAL"
+
+    faltando = any(
+        not presente
+        for presente
+        in status_epis.values()
+    )
+
+    if faltando:
+
+        return "ALTA"
+
+    return "NORMAL"
+
+
+# ============================================================
+# PREPARAR FRAME PARA GRADE
+# ============================================================
+
+def preparar_frame(
+    camera,
+    frame,
+    largura,
+    altura
+):
+
+    frame = cv2.resize(
+        frame,
+        (
+            largura,
+            altura
+        )
+    )
+
+    cv2.rectangle(
+        frame,
+        (0, 0),
+        (largura, 40),
+        (25, 25, 25),
+        -1
+    )
+
+    cv2.putText(
+        frame,
+        camera.nome,
+        (12, 27),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    return frame
+
+
+# ============================================================
+# CRIAR GRADE
+# ============================================================
+
+def criar_grade(
+    frames
+):
+
+    quantidade = len(
+        frames
+    )
+
+    if quantidade == 0:
+
+        return None
+
+    if quantidade == 1:
+
+        colunas = 1
+
+        largura = 600
+
+        altura = 450
+
+    elif quantidade <= 4:
+
+        colunas = 2
+
+        largura = 480
+
+        altura = 360
+
+    else:
+
+        colunas = 3
+
+        largura = 380
+
+        altura = 285
+
+    linhas = math.ceil(
+        quantidade
+        / colunas
+    )
+
+    imagens = []
+
+    for (
+        camera,
+        frame
+    ) in frames:
+
+        imagens.append(
+            preparar_frame(
+                camera,
+                frame,
+                largura,
+                altura
+            )
+        )
+
+    while (
+        len(imagens)
+        < linhas * colunas
+    ):
+
+        imagens.append(
+            np.zeros(
+                (
+                    altura,
+                    largura,
+                    3
+                ),
+                dtype=np.uint8
+            )
+        )
+
+    grade_linhas = []
+
+    indice = 0
+
+    for _ in range(
+        linhas
+    ):
+
+        grade_linhas.append(
+            np.hstack(
+                imagens[
+                    indice:
+                    indice + colunas
+                ]
+            )
+        )
+
+        indice += colunas
+
+    return np.vstack(
+        grade_linhas
+    )
+
+
+# ============================================================
+# PAINEL CENTRAL
+# ============================================================
+
+def criar_painel(
+    altura,
+    cameras,
+    status_epis=None,
+    operador="Buscando Biometria...",
+    severidade="NORMAL"
+):
+
+    largura = getattr(
+        config,
+        "LARGURA_PAINEL_CENTRAL",
+        330
+    )
+
+    painel = np.zeros(
         (
             altura,
-            LARGURA_SIDEBAR,
+            largura,
             3
         ),
         dtype=np.uint8
     )
 
-    sidebar[:] = (
-        30,
-        30,
-        30
+    painel[:] = (
+        28,
+        28,
+        28
     )
 
     # ========================================================
-    # TÍTULO
+    # CABEÇALHO
     # ========================================================
 
     cv2.putText(
-        sidebar,
+        painel,
         "STATUS DOS EPIs",
-        (20, 40),
+        (20, 38),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.72,
+        0.62,
         (255, 255, 255),
         2,
         cv2.LINE_AA
     )
 
     cv2.line(
-        sidebar,
+        painel,
         (20, 55),
         (
-            LARGURA_SIDEBAR - 20,
+            largura - 20,
             55
         ),
-        (90, 90, 90),
+        (80, 80, 80),
         1
-    )
-
-    # ========================================================
-    # CÂMERA
-    # ========================================================
-
-    cv2.putText(
-        sidebar,
-        CONFIG_CAMERA["nome"],
-        (20, 82),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (170, 170, 170),
-        1,
-        cv2.LINE_AA
-    )
-
-    cv2.putText(
-        sidebar,
-        CONFIG_CAMERA["ambiente"],
-        (20, 104),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        (150, 150, 150),
-        1,
-        cv2.LINE_AA
     )
 
     # ========================================================
@@ -600,471 +1807,400 @@ def desenhar_sidebar(
     # ========================================================
 
     cv2.putText(
-        sidebar,
+        painel,
         "OPERADOR",
-        (20, 135),
+        (20, 90),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (170, 170, 170),
+        0.40,
+        (160, 160, 160),
         1,
         cv2.LINE_AA
     )
 
-    nome_operador = operador
+    operador_tela = str(
+        operador
+    )
 
-    if len(nome_operador) > 28:
+    if len(
+        operador_tela
+    ) > 28:
 
-        nome_operador = (
-            nome_operador[:28]
+        operador_tela = (
+            operador_tela[:28]
             + "..."
         )
 
     cv2.putText(
-        sidebar,
-        nome_operador,
-        (20, 160),
+        painel,
+        operador_tela,
+        (20, 120),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.48,
         (255, 255, 255),
         1,
         cv2.LINE_AA
     )
 
     # ========================================================
-    # STATUS GERAL
+    # SEVERIDADE
     # ========================================================
 
-    if severidade == "CRITICA":
+    cv2.putText(
+        painel,
+        "SEVERIDADE",
+        (20, 160),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.40,
+        (160, 160, 160),
+        1,
+        cv2.LINE_AA
+    )
 
-        cor_severidade = (
-            0,
-            0,
-            255
-        )
-
-    elif severidade == "ALTA":
-
-        cor_severidade = (
-            0,
-            165,
-            255
-        )
-
-    elif severidade == "INFORMATIVA":
-
-        cor_severidade = (
-            255,
-            200,
-            0
-        )
-
+    if severidade == "NORMAL":
+        cor_severidade = (0, 200, 0)
+    elif severidade == "CRITICA":
+        cor_severidade = (0, 0, 255)
     else:
-
-        cor_severidade = (
-            0,
-            200,
-            0
-        )
+        cor_severidade = (0, 80, 255)
 
     cv2.putText(
-        sidebar,
-        f"Status: {severidade}",
+        painel,
+        severidade,
         (20, 190),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
+        0.52,
         cor_severidade,
         2,
         cv2.LINE_AA
+    )
+
+    cv2.line(
+        painel,
+        (20, 212),
+        (largura - 20, 212),
+        (80, 80, 80),
+        1
+    )
+
+    # ========================================================
+    # ESTADO
+    # ========================================================
+
+    cv2.putText(
+        painel,
+        "ESTADO",
+        (20, 245),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.40,
+        (160, 160, 160),
+        1,
+        cv2.LINE_AA
+    )
+
+    if estado_sistema == config.ESTADO_CALIBRACAO_AMBIENTE:
+        texto_estado = "ANALISE DO AMBIENTE"
+        cor_estado = (0, 220, 255)
+
+    elif estado_sistema == config.ESTADO_CONFIGURACAO_EPI:
+        texto_estado = "CONFIGURACAO EPI"
+        cor_estado = (0, 220, 255)
+
+    else:
+        texto_estado = "MONITORAMENTO"
+        cor_estado = (0, 200, 0)
+
+    cv2.putText(
+        painel,
+        texto_estado,
+        (20, 275),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        cor_estado,
+        2,
+        cv2.LINE_AA
+    )
+
+    cv2.line(
+        painel,
+        (20, 300),
+        (largura - 20, 300),
+        (80, 80, 80),
+        1
     )
 
     # ========================================================
     # EPIs
     # ========================================================
 
-    y = 230
+    cv2.putText(
+        painel,
+        "EPIs OBRIGATORIOS",
+        (20, 335),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (160, 160, 160),
+        1,
+        cv2.LINE_AA
+    )
 
-    for nome_equipamento in (
-        CONFIG_CAMERA[
-            "epis_obrigatorios"
-        ]
-    ):
+    y = 375
 
-        if nome_equipamento not in status_epis:
-            continue
+    epis_obrigatorios = getattr(
+        config,
+        "EPIS_OBRIGATORIOS",
+        []
+    )
 
-        dados = status_epis[
-            nome_equipamento
-        ]
-
-        status = dados[
-            "status"
-        ]
-
-        cor = dados[
-            "cor"
-        ]
-
+    if not epis_obrigatorios:
         cv2.putText(
-            sidebar,
-            nome_equipamento,
+            painel,
+            "Nenhum EPI configurado",
             (20, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
+            0.42,
+            (150, 150, 150),
+            1,
+            cv2.LINE_AA
+        )
+        return painel
+
+    if status_epis is None:
+        status_epis = {}
+
+    for epi in epis_obrigatorios:
+        presente = status_epis.get(epi, False)
+
+        if presente:
+            texto_status = "OK"
+            cor_status = (0, 200, 0)
+        else:
+            texto_status = "FALTA"
+            cor_status = (0, 0, 255)
+
+        cv2.putText(
+            painel,
+            epi,
+            (20, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
             (255, 255, 255),
             1,
             cv2.LINE_AA
         )
 
-        cv2.putText(
-            sidebar,
-            status,
-            (185, y),
+        tamanho, _ = cv2.getTextSize(
+            texto_status,
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
-            cor,
+            2
+        )
+
+        x_status = largura - tamanho[0] - 25
+
+        cv2.putText(
+            painel,
+            texto_status,
+            (x_status, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            cor_status,
             2,
             cv2.LINE_AA
         )
 
         cv2.line(
-            sidebar,
+            painel,
             (20, y + 15),
-            (
-                LARGURA_SIDEBAR - 20,
-                y + 15
-            ),
+            (largura - 20, y + 15),
             (65, 65, 65),
             1
         )
 
         y += 48
 
-    # ========================================================
-    # JUNTA CÂMERA + SIDEBAR
-    # ========================================================
+        if y > altura - 20:
+            break
 
-    return np.hstack(
-        (
-            frame,
-            sidebar
-        )
-    )
+    return painel
 
 
 # ============================================================
-# LOOP PRINCIPAL
+# MAIN
 # ============================================================
 
-while cap.isOpened():
+def main():
 
-    success, frame = cap.read()
+    global estado_sistema
 
-    if not success:
+    cameras = descobrir_cameras()
 
-        print(
-            "❌ Não foi possível "
-            "capturar imagem da câmera."
-        )
+    contador_frames = 0
+    configuracao_iniciada = False
 
-        break
+    if estado_sistema == config.ESTADO_MONITORAMENTO:
+        carregar_modelo_epi()
 
-    contador_frames += 1
+    try:
 
-    # ========================================================
-    # DETECÇÃO DE EPI
-    # ========================================================
+        while True:
 
-    results_epi = list(
-        model_epi(
-            frame,
-            conf=config.CONFIDENCIA_MINIMA,
-            imgsz=config.TAMANHO_IMAGEM,
-            stream=True,
-            device=device
-        )
-    )
+            contador_frames += 1
 
-    # ========================================================
-    # DETECÇÃO DE POSE
-    # ========================================================
-
-    results_pose = list(
-        model_pose(
-            frame,
-            conf=0.5,
-            stream=True,
-            device=device
-        )
-    )
-
-    # ========================================================
-    # FRAME VISUAL
-    # ========================================================
-
-    annotated_frame = frame.copy()
-
-    ombro_principal = [0, 0]
-    quadril_principal = [0, 0]
-
-    # ========================================================
-    # PROCESSAMENTO DA POSE
-    # ========================================================
-
-    for resultado_pose in results_pose:
-
-        if (
-            resultado_pose.keypoints
-            is not None
-            and len(
-                resultado_pose.keypoints.xy
-            ) > 0
-        ):
-
-            # -----------------------------------------------
-            # POR ENQUANTO USAMOS A PRIMEIRA PESSOA
-            # -----------------------------------------------
-
-            kp = (
-                resultado_pose
-                .keypoints
-                .xy[0]
-                .cpu()
-                .numpy()
+            frames = (
+                capturar_frames_sincronizados(cameras)
+                if cameras
+                else []
             )
 
-            if len(kp) > 11:
+            status_epis = {}
+            operador = "Buscando Biometria..."
+            severidade = "NORMAL"
 
-                ombro_principal = (
-                    kp[5]
+            # =================================================
+            # CALIBRACAO
+            # =================================================
+
+            if estado_sistema == config.ESTADO_CALIBRACAO_AMBIENTE:
+
+                if frames:
+
+                    nova_analise = (
+                        contador_frames == 1
+                        or contador_frames % INTERVALO_ANALISE_AMBIENTE == 0
+                    )
+
+                    if nova_analise:
+                        frames_visuais = analisar_ambiente_cameras(frames)
+                    else:
+                        frames_visuais = desenhar_objetos_existentes(frames)
+
+                    if (
+                        contador_frames >= FRAMES_ANTES_CONFIGURACAO
+                        and not configuracao_iniciada
+                    ):
+
+                        tem_objeto = any(
+                            camera.total_objetos > 0
+                            for camera in cameras.values()
+                        )
+
+                        if tem_objeto:
+
+                            configuracao_iniciada = True
+
+                            frames_config = capturar_frames_sincronizados(
+                                cameras
+                            )
+
+                            analisar_ambiente_cameras(
+                                frames_config
+                            )
+
+                            sucesso = configurar_ambiente(
+                                frames_config
+                            )
+
+                            if not sucesso:
+                                configuracao_iniciada = False
+
+                else:
+                    frames_visuais = []
+
+            # =================================================
+            # MONITORAMENTO
+            # =================================================
+
+            elif estado_sistema == config.ESTADO_MONITORAMENTO:
+
+                frames_visuais = frames
+
+                if frames:
+                    status_epis = analisar_epis_cameras(frames)
+                    severidade = calcular_severidade_epi(
+                        status_epis
+                    )
+
+            # =================================================
+            # CONFIGURACAO DE EPI
+            # =================================================
+
+            else:
+                frames_visuais = frames
+
+            # =================================================
+            # GRADE
+            # =================================================
+
+            grade = criar_grade(
+                frames_visuais
+            )
+
+            if grade is not None:
+
+                painel = criar_painel(
+                    grade.shape[0],
+                    cameras,
+                    status_epis=status_epis,
+                    operador=operador,
+                    severidade=severidade
                 )
 
-                quadril_principal = (
-                    kp[11]
-                )
-
-        # ====================================================
-        # BIOMETRIA
-        # ====================================================
-
-        for box in resultado_pose.boxes:
-
-            if int(box.cls[0]) != 0:
-                continue
-
-            x1, y1, x2, y2 = map(
-                int,
-                box.xyxy[0]
-            )
-
-            conf_pessoa = float(
-                box.conf[0]
-            )
-
-            # -----------------------------------------------
-            # BIOMETRIA A CADA 15 FRAMES
-            # -----------------------------------------------
-
-            if contador_frames % 15 == 0:
-
-                h_box = y2 - y1
-
-                y_peito = (
-                    y1
-                    + int(
-                        h_box * 0.55
+                tela = np.hstack(
+                    (
+                        grade,
+                        painel
                     )
                 )
 
-                recorte_rosto = frame[
-                    max(0, y1):
-                    max(0, y_peito),
-                    max(0, x1):
-                    max(0, x2)
-                ]
+            else:
 
-                if recorte_rosto.size > 0:
+                tela = np.zeros(
+                    (
+                        500,
+                        900,
+                        3
+                    ),
+                    dtype=np.uint8
+                )
 
-                    try:
+                cv2.putText(
+                    tela,
+                    "PROCURANDO CAMERAS...",
+                    (250, 250),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 220, 255),
+                    2,
+                    cv2.LINE_AA
+                )
 
-                        match = DeepFace.find(
-                            img_path=recorte_rosto,
-                            db_path="banco_biometria",
-                            model_name="Facenet",
-                            enforce_detection=False,
-                            silent=True
-                        )
+            cv2.imshow(
+                getattr(
+                    config,
+                    "NOME_JANELA",
+                    "FIAP x SPI Challenge 2026"
+                ),
+                tela
+            )
 
-                        if (
-                            len(match) > 0
-                            and not match[
-                                0
-                            ].empty
-                        ):
+            tecla = cv2.waitKey(1) & 0xFF
 
-                            caminho_identidade = (
-                                match[0]
-                                .iloc[0]
-                                ["identity"]
-                            )
+            if tecla == ord("q"):
+                break
 
-                            arquivo_id = (
-                                os.path.basename(
-                                    caminho_identidade
-                                )
-                            )
+    finally:
 
-                            matricula = (
-                                os.path.splitext(
-                                    arquivo_id
-                                )[0]
-                            )
+        for camera in list(
+            cameras.values()
+        ):
+            camera.liberar()
 
-                            matricula_atual = (
-                                matricula
-                            )
-
-                            dados_operador_atual = (
-                                DADOS_OPERADORES.get(
-                                    matricula
-                                )
-                            )
-
-                            if dados_operador_atual:
-
-                                ultimo_operador_identificado = (
-                                    formatar_operador(
-                                        dados_operador_atual
-                                    )
-                                )
-
-                            else:
-
-                                ultimo_operador_identificado = (
-                                    "Rosto Desconhecido"
-                                )
-
-                    except Exception:
-                        pass
-
-    # ========================================================
-    # REGRAS SITUACIONAIS
-    # ========================================================
-
-    severidade, lista_pes, epis_detectados = (
-        processar_regras_situacionais(
-
-            results_epi,
-
-            CONFIG_CAMERA[
-                "zona_risco"
-            ],
-
-            matricula=matricula_atual,
-
-            operador=ultimo_operador_identificado,
-
-            frame=frame,
-
-            ombro=ombro_principal,
-
-            quadril=quadril_principal,
-
-            # NOVOS PARÂMETROS
-            camera_id=CONFIG_CAMERA[
-                "id"
-            ],
-
-            camera_nome=CONFIG_CAMERA[
-                "nome"
-            ],
-
-            ambiente=CONFIG_CAMERA[
-                "ambiente"
-            ],
-
-            epis_obrigatorios=CONFIG_CAMERA[
-                "epis_obrigatorios"
-            ]
-        )
-    )
-
-    # ========================================================
-    # STATUS DOS EPIs
-    # ========================================================
-
-    status_epis = analisar_status_epis(
-        results_epi,
-        CONFIG_CAMERA[
-            "epis_obrigatorios"
-        ]
-    )
-
-    # ========================================================
-    # ALERTA VISUAL
-    # ========================================================
-
-    if severidade == "CRITICA":
-
-        cv2.putText(
-            annotated_frame,
-            "CRITICO: RISCO DE SEGURANCA",
-            (15, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-    elif severidade == "ALTA":
-
-        cv2.putText(
-            annotated_frame,
-            "ALTO: INFRACAO OU RISCO ERGONOMICO",
-            (15, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 165, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-    # ========================================================
-    # SIDEBAR
-    # ========================================================
-
-    tela_final = desenhar_sidebar(
-        annotated_frame,
-        status_epis,
-        ultimo_operador_identificado,
-        severidade
-    )
-
-    # ========================================================
-    # EXIBIÇÃO
-    # ========================================================
-
-    cv2.imshow(
-        "FIAP x SPI Challenge 2026",
-        tela_final
-    )
-
-    # ========================================================
-    # SAÍDA
-    # ========================================================
-
-    if (
-        cv2.waitKey(1) & 0xFF
-        == ord("q")
-    ):
-
-        break
+        cv2.destroyAllWindows()
 
 
 # ============================================================
-# FINALIZAÇÃO
+# EXECUCAO
 # ============================================================
 
-cap.release()
-
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

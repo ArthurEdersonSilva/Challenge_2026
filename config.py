@@ -4,12 +4,40 @@ import numpy as np
 
 
 # ============================================================
-# MODELO DE VISÃO COMPUTACIONAL
+# SISTEMA
+# ============================================================
+
+NOME_JANELA = "FIAP x SPI Challenge 2026"
+
+NOME_AMBIENTE = "Ambiente Principal"
+
+
+# ============================================================
+# ESTADOS DO SISTEMA
+# ============================================================
+
+ESTADO_CALIBRACAO_AMBIENTE = "CALIBRACAO_AMBIENTE"
+
+ESTADO_CONFIGURACAO_EPI = "CONFIGURACAO_EPI"
+
+ESTADO_MONITORAMENTO = "MONITORAMENTO"
+
+
+# ============================================================
+# MODELOS
 # ============================================================
 
 PATH_MODELO = "best.pt"
 
+PATH_MODELO_POSE = "yolov8n-pose.pt"
+
+PATH_MODELO_MAQUINARIO = None
+
 CONFIDENCIA_MINIMA = 0.5
+
+CONFIANCA_POSE = 0.5
+
+CONFIANCA_MAQUINARIO = 0.5
 
 TAMANHO_IMAGEM = 640
 
@@ -19,43 +47,312 @@ TAMANHO_IMAGEM = 640
 # ============================================================
 
 LARGURA_CAM = 640
+
 ALTURA_CAM = 480
 
 MAX_CAMERAS = 66
 
 
+CAMERAS = {}
+
+
+for camera_id in range(MAX_CAMERAS):
+
+    CAMERAS[camera_id] = {
+
+        "nome": f"Camera {camera_id + 1:02d}",
+
+        "fonte": camera_id,
+
+        # Todas ficam disponíveis para tentativa.
+        # O main.py verifica automaticamente
+        # quais realmente existem e consegue abrir.
+        "ativa": True,
+    }
+
+
+# ============================================================
+# CÂMERAS RTSP
+#
+# Caso futuramente seja necessário adicionar uma câmera IP,
+# basta substituir a fonte correspondente.
+#
+# Exemplo:
+#
+# CAMERAS[10]["fonte"] = (
+#     "rtsp://usuario:senha@192.168.0.20:554/stream"
+# )
+# ============================================================
+
+
 # ============================================================
 # EPIs DISPONÍVEIS
+#
+# IMPORTANTE:
+# Esta lista NÃO significa que todos são obrigatórios.
+# São somente as opções que serão apresentadas ao usuário.
 # ============================================================
 
 EPIS_DISPONIVEIS = [
+
     "Capacete",
+
     "Óculos",
+
     "Máscara",
+
     "Luvas",
+
     "Protetor auricular",
+
     "Colete",
 ]
 
 
 # ============================================================
-# CONFIGURAÇÃO PADRÃO DOS EPIs
-# ============================================================
-
-EPIS_PADRAO = [
-    "Capacete",
-    "Óculos",
-    "Máscara",
-    "Luvas",
-    "Protetor auricular",
-    "Colete",
-]
-
-
-# ============================================================
-# ZONA DE RISCO PADRÃO
+# EPIs OBRIGATÓRIOS
 #
-# Cada câmera poderá possuir sua própria zona.
+# Começam vazios.
+#
+# Depois da análise do ambiente e confirmação dos
+# maquinários, o sistema perguntará ao usuário quais
+# EPIs são obrigatórios.
+# ============================================================
+
+EPIS_OBRIGATORIOS = []
+
+EPIS_CONFIGURADOS = False
+
+
+# ============================================================
+# CALIBRAÇÃO DO AMBIENTE
+# ============================================================
+
+AMBIENTE_CALIBRADO = False
+
+
+# ============================================================
+# OBJETOS GLOBAIS
+#
+# Os objetos pertencem ao ambiente.
+#
+# Um mesmo objeto poderá aparecer em várias câmeras
+# sem ser considerado vários objetos diferentes.
+#
+# Exemplo:
+#
+# OBJETO_001
+#   Camera 01
+#   Camera 02
+#   Camera 03
+#
+# = um único equipamento físico
+# ============================================================
+
+OBJETOS_GLOBAIS = {}
+
+
+# ============================================================
+# PERSISTÊNCIA
+# ============================================================
+
+PASTA_CONFIGURACOES = (
+    "configuracoes"
+)
+
+
+PATH_CONFIG_AMBIENTE = os.path.join(
+    PASTA_CONFIGURACOES,
+    "ambiente.json"
+)
+
+
+PATH_CONFIG_EPIS = os.path.join(
+    PASTA_CONFIGURACOES,
+    "epis.json"
+)
+
+
+# ============================================================
+# CRIAR PASTA DE CONFIGURAÇÃO
+# ============================================================
+
+def garantir_pasta_configuracoes():
+
+    os.makedirs(
+        PASTA_CONFIGURACOES,
+        exist_ok=True
+    )
+
+
+# ============================================================
+# SALVAR AMBIENTE
+# ============================================================
+
+def salvar_configuracao_ambiente(
+    objetos_globais
+):
+
+    garantir_pasta_configuracoes()
+
+    dados = {
+
+        "ambiente":
+            NOME_AMBIENTE,
+
+        "calibrado":
+            True,
+
+        "objetos":
+            objetos_globais,
+    }
+
+    try:
+
+        with open(
+            PATH_CONFIG_AMBIENTE,
+            "w",
+            encoding="utf-8"
+        ) as arquivo:
+
+            json.dump(
+                dados,
+                arquivo,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        return True
+
+    except Exception as erro:
+
+        print(
+            f"Erro ao salvar ambiente: "
+            f"{erro}"
+        )
+
+        return False
+
+
+# ============================================================
+# CARREGAR AMBIENTE
+# ============================================================
+
+def carregar_configuracao_ambiente():
+
+    if not os.path.exists(
+        PATH_CONFIG_AMBIENTE
+    ):
+
+        return None
+
+    try:
+
+        with open(
+            PATH_CONFIG_AMBIENTE,
+            "r",
+            encoding="utf-8"
+        ) as arquivo:
+
+            return json.load(
+                arquivo
+            )
+
+    except Exception as erro:
+
+        print(
+            f"Erro ao carregar ambiente: "
+            f"{erro}"
+        )
+
+        return None
+
+
+# ============================================================
+# SALVAR EPIs
+# ============================================================
+
+def salvar_configuracao_epis(
+    epis
+):
+
+    garantir_pasta_configuracoes()
+
+    dados = {
+
+        "configurado":
+            True,
+
+        "epis_obrigatorios":
+            epis,
+    }
+
+    try:
+
+        with open(
+            PATH_CONFIG_EPIS,
+            "w",
+            encoding="utf-8"
+        ) as arquivo:
+
+            json.dump(
+                dados,
+                arquivo,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        return True
+
+    except Exception as erro:
+
+        print(
+            f"Erro ao salvar EPIs: "
+            f"{erro}"
+        )
+
+        return False
+
+
+# ============================================================
+# CARREGAR EPIs
+# ============================================================
+
+def carregar_configuracao_epis():
+
+    if not os.path.exists(
+        PATH_CONFIG_EPIS
+    ):
+
+        return None
+
+    try:
+
+        with open(
+            PATH_CONFIG_EPIS,
+            "r",
+            encoding="utf-8"
+        ) as arquivo:
+
+            return json.load(
+                arquivo
+            )
+
+    except Exception as erro:
+
+        print(
+            f"Erro ao carregar EPIs: "
+            f"{erro}"
+        )
+
+        return None
+
+
+# ============================================================
+# ZONA DE RISCO
+#
+# A zona continua por câmera porque cada câmera possui
+# perspectiva diferente do mesmo ambiente.
 # ============================================================
 
 PONTOS_ZONA_RISCO_PADRAO = np.array(
@@ -69,190 +366,61 @@ PONTOS_ZONA_RISCO_PADRAO = np.array(
 )
 
 
-# Mantido para compatibilidade com códigos antigos.
-PONTOS_ZONA_RISCO = PONTOS_ZONA_RISCO_PADRAO.copy()
-
-
-# ============================================================
-# CAMERAS
-#
-# Estrutura:
-#
-# CAMERAS = {
-#     0: {
-#         "nome": "...",
-#         "fonte": 0,
-#         "ativa": True,
-#         "ambiente": "...",
-#         "epis_obrigatorios": [...],
-#         "pontos_zona": [...]
-#     }
-# }
-#
-# A câmera 0 continua sendo a câmera real utilizada agora.
-# As demais ficam desativadas até serem configuradas.
-# ============================================================
-
-CAMERAS = {}
+PONTOS_ZONAS = {}
 
 
 for camera_id in range(MAX_CAMERAS):
 
-    CAMERAS[camera_id] = {
-        "nome": f"Camera {camera_id + 1:02d}",
-
-        # Câmera 0 utiliza webcam.
-        # As demais começam sem fonte válida.
-        "fonte": camera_id if camera_id == 0 else camera_id,
-
-        # Somente a câmera 0 começa ativa.
-        "ativa": True if camera_id == 0 else False,
-
-        "ambiente": (
-            "Ambiente principal"
-            if camera_id == 0
-            else f"Ambiente {camera_id + 1:02d}"
-        ),
-
-        # Por padrão, todos os EPIs são obrigatórios.
-        "epis_obrigatorios": EPIS_PADRAO.copy(),
-
-        # Cada câmera possui sua própria zona.
-        "pontos_zona": PONTOS_ZONA_RISCO_PADRAO.copy(),
-
-        # Maquinário configurado naquela câmera.
-        "maquinarios": [],
-    }
+    PONTOS_ZONAS[
+        camera_id
+    ] = (
+        PONTOS_ZONA_RISCO_PADRAO.copy()
+    )
 
 
-# ============================================================
-# EXEMPLO DE CONFIGURAÇÃO DAS CÂMERAS
-#
-# Quando tivermos as câmeras reais, basta alterar aqui.
-#
-# Exemplo:
-#
-# CAMERAS[1] = {
-#     "nome": "Camera 02",
-#     "fonte": "rtsp://usuario:senha@ip:554/stream",
-#     "ativa": True,
-#     "ambiente": "Linha de Produção",
-#     "epis_obrigatorios": [
-#         "Capacete",
-#         "Luvas",
-#     ],
-#     "pontos_zona": np.array([
-#         [50, 400],
-#         [200, 200],
-#         [500, 200],
-#         [630, 400],
-#     ], dtype=np.int32),
-#     "maquinarios": [2, 4],
-# }
-# ============================================================
-
-
-# ============================================================
-# MAQUINÁRIO
-# ============================================================
-
-PATH_CONFIG_MAQUINARIOS = os.path.join(
-    "configuracoes",
-    "maquinarios.json"
+# Compatibilidade com partes antigas do projeto.
+PONTOS_ZONA_RISCO = (
+    PONTOS_ZONA_RISCO_PADRAO.copy()
 )
-
-
-def garantir_pasta_configuracoes():
-
-    pasta = os.path.dirname(
-        PATH_CONFIG_MAQUINARIOS
-    )
-
-    os.makedirs(
-        pasta,
-        exist_ok=True
-    )
-
-
-def carregar_maquinarios():
-
-    garantir_pasta_configuracoes()
-
-    if not os.path.exists(
-        PATH_CONFIG_MAQUINARIOS
-    ):
-        return {}
-
-    try:
-
-        with open(
-            PATH_CONFIG_MAQUINARIOS,
-            "r",
-            encoding="utf-8"
-        ) as arquivo:
-
-            dados = json.load(arquivo)
-
-            return dados
-
-    except Exception as erro:
-
-        print(
-            f"⚠️ Erro ao carregar "
-            f"configuração de maquinários: {erro}"
-        )
-
-        return {}
-
-
-def salvar_maquinarios(
-    configuracao_maquinarios
-):
-
-    garantir_pasta_configuracoes()
-
-    try:
-
-        with open(
-            PATH_CONFIG_MAQUINARIOS,
-            "w",
-            encoding="utf-8"
-        ) as arquivo:
-
-            json.dump(
-                configuracao_maquinarios,
-                arquivo,
-                indent=4,
-                ensure_ascii=False
-            )
-
-        return True
-
-    except Exception as erro:
-
-        print(
-            f"❌ Erro ao salvar "
-            f"configuração de maquinários: {erro}"
-        )
-
-        return False
-
-
-# Carrega configuração persistente.
-MAQUINARIOS = carregar_maquinarios()
 
 
 # ============================================================
 # INCIDENTES
 # ============================================================
 
-PATH_LOGS_CSV = "historico_incidentes.csv"
+PATH_LOGS_CSV = (
+    "historico_incidentes.csv"
+)
 
-PASTA_PROVAS_INCIDENTES = "provas_incidentes"
+
+PASTA_PROVAS_INCIDENTES = (
+    "provas_incidentes"
+)
+
+
+# ------------------------------------------------------------
+# 5 MINUTOS ENTRE FOTOS DO MESMO INCIDENTE
+# ------------------------------------------------------------
+
+INTERVALO_REPETICAO_INCIDENTE_SEGUNDOS = 300
+
+
+# ------------------------------------------------------------
+# INFRAÇÃO PRECISA PERSISTIR POR ALGUNS FRAMES
+# ------------------------------------------------------------
+
+FRAMES_CONFIRMACAO_INFRACAO = 5
+
+
+# ------------------------------------------------------------
+# TEMPO PARA CONSIDERAR QUE UMA INFRAÇÃO DESAPARECEU
+# ------------------------------------------------------------
+
+TEMPO_RESET_INCIDENTE_SEGUNDOS = 1.0
 
 
 # ============================================================
-# ALERTA SONORO
+# ALERTA
 # ============================================================
 
 FREQ_BEEP_CRITICO = 1500
@@ -264,27 +432,25 @@ DURACAO_BEEP_CRITICO = 400
 # BIOMETRIA
 # ============================================================
 
-PATH_BANCO_BIOMETRIA = "banco_biometria"
+PATH_BANCO_BIOMETRIA = (
+    "banco_biometria"
+)
+
 
 PATH_DADOS_OPERADORES = os.path.join(
     PATH_BANCO_BIOMETRIA,
     "dados_operadores.csv"
 )
 
+
 MODELO_FACE = "Facenet"
 
-# Intervalo mínimo entre tentativas de
-# reconhecimento da mesma pessoa.
 INTERVALO_BIOMETRIA_SEGUNDOS = 3.0
 
 
 # ============================================================
-# POSE / ERGONOMIA
+# ERGONOMIA
 # ============================================================
-
-PATH_MODELO_POSE = "yolov8n-pose.pt"
-
-CONFIANCA_POSE = 0.5
 
 LIMITE_FRAMES_FADIGA = 90
 
@@ -297,116 +463,49 @@ LIMIAR_POSTURA_INADEQUADA = 85
 
 TRACKING_ATIVO = True
 
-# Tempo em segundos para manter uma pessoa
-# temporariamente no sistema depois que ela
-# deixa de ser detectada.
-TEMPO_PERMANENCIA_TRACKING = 2.0
-
-
-# ============================================================
-# DETECTOR DE MAQUINÁRIO
-#
-# Ainda não existe um segundo modelo definido.
-# Portanto, deixamos preparado sem fingir
-# que o best.pt detecta máquinas.
-# ============================================================
-
 TRACKING_MAQUINARIO_ATIVO = True
 
-PATH_MODELO_MAQUINARIO = None
-
-CONFIANCA_MAQUINARIO = 0.5
-
-
-# ============================================================
-# INCIDENTES
-# ============================================================
-
-INTERVALO_REPETICAO_INCIDENTE_SEGUNDOS = 300
-
-# 300 segundos = 5 minutos.
-#
-# A ideia é:
-#
-# primeira ocorrência
-#       ↓
-# registra foto
-#       ↓
-# incidente continua?
-#       ↓
-# aguarda 5 minutos
-#       ↓
-# nova evidência
-#
+TEMPO_PERMANENCIA_TRACKING = 2.0
 
 
 # ============================================================
 # INTERFACE
 # ============================================================
 
-LARGURA_SIDEBAR = 330
-
-NOME_JANELA = "FIAP x SPI Challenge 2026"
+LARGURA_PAINEL_CENTRAL = 330
 
 
 # ============================================================
-# FUNÇÕES AUXILIARES
+# CÂMERAS HABILITADAS PARA DESCOBERTA
+#
+# Isso NÃO significa que todas existem.
+#
+# O main.py tenta abrir automaticamente e mantém apenas
+# as câmeras realmente disponíveis.
 # ============================================================
 
-def obter_config_camera(camera_id):
+def obter_cameras_ativas():
 
-    if camera_id not in CAMERAS:
+    return {
 
-        raise ValueError(
-            f"Câmera {camera_id} não está configurada."
+        camera_id: dados
+
+        for camera_id, dados
+        in CAMERAS.items()
+
+        if dados.get(
+            "ativa",
+            True
         )
-
-    return CAMERAS[camera_id]
-
-
-def ativar_camera(
-    camera_id,
-    fonte=None,
-    nome=None,
-    ambiente=None,
-    epis_obrigatorios=None
-):
-
-    if camera_id < 0 or camera_id >= MAX_CAMERAS:
-
-        raise ValueError(
-            f"O ID da câmera deve estar entre "
-            f"0 e {MAX_CAMERAS - 1}."
-        )
-
-    CAMERAS[camera_id]["ativa"] = True
-
-    if fonte is not None:
-        CAMERAS[camera_id]["fonte"] = fonte
-
-    if nome is not None:
-        CAMERAS[camera_id]["nome"] = nome
-
-    if ambiente is not None:
-        CAMERAS[camera_id]["ambiente"] = ambiente
-
-    if epis_obrigatorios is not None:
-        CAMERAS[camera_id][
-            "epis_obrigatorios"
-        ] = epis_obrigatorios
+    }
 
 
-def desativar_camera(camera_id):
+# ============================================================
+# OBTER CONFIGURAÇÃO DE CÂMERA
+# ============================================================
 
-    if camera_id not in CAMERAS:
-        return
-
-    CAMERAS[camera_id]["ativa"] = False
-
-
-def configurar_zona_camera(
-    camera_id,
-    pontos
+def obter_config_camera(
+    camera_id
 ):
 
     if camera_id not in CAMERAS:
@@ -415,8 +514,74 @@ def configurar_zona_camera(
             f"Câmera {camera_id} não existe."
         )
 
-    CAMERAS[camera_id][
-        "pontos_zona"
+    return CAMERAS[
+        camera_id
+    ]
+
+
+# ============================================================
+# ATIVAR CÂMERA
+# ============================================================
+
+def ativar_camera(
+    camera_id,
+    fonte=None,
+    nome=None
+):
+
+    if (
+        camera_id < 0
+        or camera_id >= MAX_CAMERAS
+    ):
+
+        raise ValueError(
+            f"ID deve estar entre 0 e "
+            f"{MAX_CAMERAS - 1}."
+        )
+
+    CAMERAS[
+        camera_id
+    ]["ativa"] = True
+
+    if fonte is not None:
+
+        CAMERAS[
+            camera_id
+        ]["fonte"] = fonte
+
+    if nome is not None:
+
+        CAMERAS[
+            camera_id
+        ]["nome"] = nome
+
+
+# ============================================================
+# DESATIVAR CÂMERA
+# ============================================================
+
+def desativar_camera(
+    camera_id
+):
+
+    if camera_id in CAMERAS:
+
+        CAMERAS[
+            camera_id
+        ]["ativa"] = False
+
+
+# ============================================================
+# CONFIGURAR ZONA DA CÂMERA
+# ============================================================
+
+def configurar_zona_camera(
+    camera_id,
+    pontos
+):
+
+    PONTOS_ZONAS[
+        camera_id
     ] = np.array(
         pontos,
         dtype=np.int32
@@ -424,65 +589,146 @@ def configurar_zona_camera(
 
 
 # ============================================================
-# INFORMAÇÕES DO SISTEMA
+# CARREGAMENTO DAS CONFIGURAÇÕES SALVAS
+# ============================================================
+
+def carregar_configuracoes():
+
+    global AMBIENTE_CALIBRADO
+
+    global OBJETOS_GLOBAIS
+
+    global EPIS_CONFIGURADOS
+
+    global EPIS_OBRIGATORIOS
+
+
+    ambiente = (
+        carregar_configuracao_ambiente()
+    )
+
+
+    if ambiente:
+
+        AMBIENTE_CALIBRADO = (
+            ambiente.get(
+                "calibrado",
+                False
+            )
+        )
+
+        OBJETOS_GLOBAIS = (
+            ambiente.get(
+                "objetos",
+                {}
+            )
+        )
+
+
+    epis = (
+        carregar_configuracao_epis()
+    )
+
+
+    if epis:
+
+        EPIS_CONFIGURADOS = (
+            epis.get(
+                "configurado",
+                False
+            )
+        )
+
+        EPIS_OBRIGATORIOS = (
+            epis.get(
+                "epis_obrigatorios",
+                []
+            )
+        )
+
+
+# ============================================================
+# ESTADO INICIAL
+# ============================================================
+
+def obter_estado_inicial():
+
+    if not AMBIENTE_CALIBRADO:
+
+        return (
+            ESTADO_CALIBRACAO_AMBIENTE
+        )
+
+    if not EPIS_CONFIGURADOS:
+
+        return (
+            ESTADO_CONFIGURACAO_EPI
+        )
+
+    return (
+        ESTADO_MONITORAMENTO
+    )
+
+
+# ============================================================
+# MOSTRAR CONFIGURAÇÃO
 # ============================================================
 
 def mostrar_configuracao():
 
-    cameras_ativas = sum(
-        1
-        for camera in CAMERAS.values()
-        if camera["ativa"]
-    )
-
-    print("\n==========================================")
-    print(" CONFIGURAÇÃO DO SISTEMA")
-    print("==========================================")
-
+    print()
     print(
-        f"Modelo EPI: {PATH_MODELO}"
+        "===================================="
+    )
+    print(
+        " CONFIGURAÇÃO DO SISTEMA"
+    )
+    print(
+        "===================================="
     )
 
     print(
-        f"Confiança mínima: {CONFIDENCIA_MINIMA}"
+        f"Ambiente: "
+        f"{NOME_AMBIENTE}"
     )
 
     print(
-        f"Resolução: "
-        f"{LARGURA_CAM}x{ALTURA_CAM}"
-    )
-
-    print(
-        f"Câmeras configuradas: "
+        f"Máximo de câmeras: "
         f"{MAX_CAMERAS}"
     )
 
     print(
-        f"Câmeras ativas: "
-        f"{cameras_ativas}"
+        "Descoberta de câmeras: "
+        "AUTOMÁTICA"
     )
 
     print(
-        f"Banco biométrico: "
-        f"{PATH_BANCO_BIOMETRIA}"
+        f"Ambiente calibrado: "
+        f"{AMBIENTE_CALIBRADO}"
     )
 
     print(
-        f"Log de incidentes: "
-        f"{PATH_LOGS_CSV}"
+        f"EPIs configurados: "
+        f"{EPIS_CONFIGURADOS}"
     )
 
     print(
-        f"Modelo de maquinário: "
-        f"{PATH_MODELO_MAQUINARIO}"
+        f"Estado inicial: "
+        f"{obter_estado_inicial()}"
     )
 
-    print("==========================================\n")
+    print(
+        "===================================="
+    )
+    print()
 
 
 # ============================================================
-# EXECUÇÃO DIRETA
+# INICIALIZAÇÃO
 # ============================================================
+
+carregar_configuracoes()
+
 
 if __name__ == "__main__":
 
