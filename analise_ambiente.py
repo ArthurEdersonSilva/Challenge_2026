@@ -1,29 +1,113 @@
 import cv2
 import numpy as np
 
-import config
+from ultralytics import FastSAM
 
 
 # ============================================================
-# CONFIGURAÇÕES DA ANÁLISE
+# CONFIGURAÇÕES
 # ============================================================
 
-AREA_MINIMA_PERCENTUAL = 0.015
+MODELO_AMBIENTE = "FastSAM-s.pt"
 
-AREA_MAXIMA_PERCENTUAL = 0.85
+CONFIANCA_MINIMA = 0.35
+IOU_MODELO = 0.80
+TAMANHO_ANALISE = 1024
+
+# Ignora fragmentos muito pequenos
+AREA_MINIMA_PERCENTUAL = 0.012
+
+# Ignora máscaras que praticamente representam a cena inteira
+AREA_MAXIMA_PERCENTUAL = 0.70
 
 LARGURA_MINIMA = 45
-
 ALTURA_MINIMA = 45
 
-DISTANCIA_SOBREPOSICAO = 0.35
+# Sobreposição para considerar duas caixas redundantes
+IOU_REPETICAO = 0.55
+
+# Se uma caixa estiver quase toda dentro de outra,
+# pode representar fragmentação do mesmo objeto.
+PERCENTUAL_CONTENCAO = 0.82
 
 
 # ============================================================
-# IOU
+# MODELO
 # ============================================================
 
-def calcular_iou(
+modelo_ambiente = None
+
+
+# ============================================================
+# CARREGAR MODELO
+# ============================================================
+
+def carregar_modelo_ambiente():
+
+    global modelo_ambiente
+
+    if modelo_ambiente is not None:
+        return modelo_ambiente
+
+    print()
+    print("==========================================")
+    print(" MODELO DE ANALISE DO AMBIENTE")
+    print("==========================================")
+
+    try:
+
+        modelo_ambiente = FastSAM(
+            MODELO_AMBIENTE
+        )
+
+        print(
+            f"Modelo carregado: {MODELO_AMBIENTE}"
+        )
+
+    except Exception as erro:
+
+        print(
+            f"Erro carregando FastSAM: {erro}"
+        )
+
+        modelo_ambiente = None
+
+    print("==========================================")
+    print()
+
+    return modelo_ambiente
+
+
+# ============================================================
+# ÁREA DA CAIXA
+# ============================================================
+
+def calcular_area_caixa(
+    caixa
+):
+
+    x1, y1, x2, y2 = caixa
+
+    largura = max(
+        0,
+        x2 - x1
+    )
+
+    altura = max(
+        0,
+        y2 - y1
+    )
+
+    return (
+        largura * altura
+    )
+
+
+# ============================================================
+# INTERSEÇÃO
+# ============================================================
+
+def calcular_intersecao(
     caixa_a,
     caixa_b
 ):
@@ -61,18 +145,34 @@ def calcular_iou(
         y2 - y1
     )
 
-    intersecao = (
+    return (
         largura * altura
     )
 
-    area_a = (
-        (ax2 - ax1)
-        * (ay2 - ay1)
+
+# ============================================================
+# IOU
+# ============================================================
+
+def calcular_iou(
+    caixa_a,
+    caixa_b
+):
+
+    intersecao = calcular_intersecao(
+        caixa_a,
+        caixa_b
     )
 
-    area_b = (
-        (bx2 - bx1)
-        * (by2 - by1)
+    if intersecao <= 0:
+        return 0.0
+
+    area_a = calcular_area_caixa(
+        caixa_a
+    )
+
+    area_b = calcular_area_caixa(
+        caixa_b
     )
 
     uniao = (
@@ -82,7 +182,6 @@ def calcular_iou(
     )
 
     if uniao <= 0:
-
         return 0.0
 
     return (
@@ -91,142 +190,157 @@ def calcular_iou(
 
 
 # ============================================================
-# REMOVER CAIXAS REPETIDAS
+# PERCENTUAL DE CONTENÇÃO
 # ============================================================
 
-def remover_sobreposicoes(
-    caixas
+def calcular_contencao(
+    caixa_a,
+    caixa_b
 ):
 
-    if not caixas:
-
-        return []
-
-    caixas = sorted(
-        caixas,
-        key=lambda caixa: caixa["area"],
-        reverse=True
+    intersecao = calcular_intersecao(
+        caixa_a,
+        caixa_b
     )
 
-    resultado = []
+    if intersecao <= 0:
+        return 0.0
 
-    for candidata in caixas:
+    area_a = calcular_area_caixa(
+        caixa_a
+    )
 
-        repetida = False
+    area_b = calcular_area_caixa(
+        caixa_b
+    )
 
-        for existente in resultado:
+    menor_area = min(
+        area_a,
+        area_b
+    )
 
-            iou = calcular_iou(
-                candidata["bbox"],
-                existente["bbox"]
-            )
+    if menor_area <= 0:
+        return 0.0
 
-            if (
-                iou
-                >= DISTANCIA_SOBREPOSICAO
-            ):
-
-                repetida = True
-
-                break
-
-        if not repetida:
-
-            resultado.append(
-                candidata
-            )
-
-    return resultado
+    return (
+        intersecao / menor_area
+    )
 
 
 # ============================================================
-# PREPARAR IMAGEM
+# VALIDAR CAIXA
 # ============================================================
 
-def preparar_imagem(
-    frame
+def caixa_valida(
+    bbox,
+    largura_frame,
+    altura_frame
 ):
 
-    cinza = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
+    x1, y1, x2, y2 = bbox
+
+    largura = (
+        x2 - x1
     )
 
-    cinza = cv2.GaussianBlur(
-        cinza,
-        (7, 7),
-        0
+    altura = (
+        y2 - y1
     )
 
-    return cinza
+    if largura < LARGURA_MINIMA:
+        return False
 
-
-# ============================================================
-# CRIAR REGIÕES
-# ============================================================
-
-def detectar_regioes(
-    frame
-):
-
-    altura_frame, largura_frame = (
-        frame.shape[:2]
-    )
+    if altura < ALTURA_MINIMA:
+        return False
 
     area_frame = (
-        altura_frame
-        * largura_frame
+        largura_frame
+        * altura_frame
     )
 
-    area_minima = int(
-        area_frame
-        * AREA_MINIMA_PERCENTUAL
+    area_caixa = (
+        largura
+        * altura
     )
 
-    area_maxima = int(
-        area_frame
-        * AREA_MAXIMA_PERCENTUAL
+    percentual = (
+        area_caixa
+        / max(
+            area_frame,
+            1
+        )
     )
 
-    cinza = preparar_imagem(
-        frame
+    if percentual < AREA_MINIMA_PERCENTUAL:
+        return False
+
+    if percentual > AREA_MAXIMA_PERCENTUAL:
+        return False
+
+    # Evita regiões que praticamente representam
+    # toda a largura da câmera.
+
+    if (
+        largura
+        >= largura_frame * 0.96
+    ):
+        return False
+
+    # Evita regiões que praticamente representam
+    # toda a altura da câmera.
+
+    if (
+        altura
+        >= altura_frame * 0.96
+    ):
+        return False
+
+    return True
+
+
+# ============================================================
+# CONVERTER MÁSCARA EM OBJETO
+# ============================================================
+
+def mascara_para_objeto(
+    mascara,
+    largura_frame,
+    altura_frame
+):
+
+    mascara = np.asarray(
+        mascara
     )
 
-    # ========================================================
-    # BORDAS
-    # ========================================================
-
-    bordas = cv2.Canny(
-        cinza,
-        40,
-        120
+    mascara = np.squeeze(
+        mascara
     )
 
-    # ========================================================
-    # FECHA PEQUENAS ABERTURAS
-    # ========================================================
+    if mascara.ndim != 2:
+        return None
 
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (9, 9)
-    )
+    mascara = (
+        mascara > 0.5
+    ).astype(
+        np.uint8
+    ) * 255
 
-    mascara = cv2.morphologyEx(
-        bordas,
-        cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
-    )
+    if (
+        mascara.shape[1]
+        != largura_frame
+        or
+        mascara.shape[0]
+        != altura_frame
+    ):
 
-    mascara = cv2.dilate(
-        mascara,
-        kernel,
-        iterations=1
-    )
-
-    # ========================================================
-    # CONTORNOS
-    # ========================================================
+        mascara = cv2.resize(
+            mascara,
+            (
+                largura_frame,
+                altura_frame
+            ),
+            interpolation=cv2.INTER_NEAREST
+        )
 
     contornos, _ = cv2.findContours(
         mascara,
@@ -234,89 +348,287 @@ def detectar_regioes(
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    caixas = []
+    if not contornos:
+        return None
 
-    for contorno in contornos:
+    # Uma máscara pode possuir pequenos fragmentos.
+    # Pegamos somente a região principal.
 
-        area_contorno = cv2.contourArea(
-            contorno
-        )
-
-        if (
-            area_contorno
-            < area_minima
-        ):
-
-            continue
-
-        x, y, largura, altura = (
-            cv2.boundingRect(
-                contorno
-            )
-        )
-
-        if (
-            largura
-            < LARGURA_MINIMA
-        ):
-
-            continue
-
-        if (
-            altura
-            < ALTURA_MINIMA
-        ):
-
-            continue
-
-        area_caixa = (
-            largura * altura
-        )
-
-        if (
-            area_caixa
-            > area_maxima
-        ):
-
-            continue
-
-        # ----------------------------------------------------
-        # Evita considerar praticamente a tela inteira
-        # como um objeto.
-        # ----------------------------------------------------
-
-        if (
-            largura
-            >= largura_frame * 0.95
-            and
-            altura
-            >= altura_frame * 0.95
-        ):
-
-            continue
-
-        caixas.append({
-
-            "bbox": [
-                int(x),
-                int(y),
-                int(x + largura),
-                int(y + altura)
-            ],
-
-            "area":
-                int(area_caixa),
-        })
-
-    caixas = remover_sobreposicoes(
-        caixas
+    contorno = max(
+        contornos,
+        key=cv2.contourArea
     )
 
-    return caixas
+    area_mascara = cv2.contourArea(
+        contorno
+    )
+
+    if area_mascara <= 0:
+        return None
+
+    x, y, largura, altura = cv2.boundingRect(
+        contorno
+    )
+
+    bbox = [
+        int(x),
+        int(y),
+        int(x + largura),
+        int(y + altura)
+    ]
+
+    if not caixa_valida(
+        bbox,
+        largura_frame,
+        altura_frame
+    ):
+        return None
+
+    return {
+
+        "bbox":
+            bbox,
+
+        "area":
+            int(
+                area_mascara
+            ),
+
+        "area_caixa":
+            int(
+                largura
+                * altura
+            ),
+    }
 
 
 # ============================================================
-# ANALISAR UM FRAME
+# REMOVER FRAGMENTAÇÃO
+# ============================================================
+
+def remover_fragmentacao(
+    candidatos
+):
+
+    if not candidatos:
+        return []
+
+    # Começa pelas regiões maiores.
+
+    candidatos = sorted(
+        candidatos,
+        key=lambda item: item["area"],
+        reverse=True
+    )
+
+    resultado = []
+
+    for candidato in candidatos:
+
+        caixa_candidata = (
+            candidato["bbox"]
+        )
+
+        repetido = False
+
+        for existente in resultado:
+
+            caixa_existente = (
+                existente["bbox"]
+            )
+
+            # ------------------------------------------------
+            # IOU
+            # ------------------------------------------------
+
+            iou = calcular_iou(
+                caixa_candidata,
+                caixa_existente
+            )
+
+            if iou >= IOU_REPETICAO:
+
+                repetido = True
+                break
+
+            # ------------------------------------------------
+            # CONTENÇÃO
+            #
+            # FastSAM frequentemente cria:
+            #
+            # cadeira inteira
+            # assento
+            # encosto
+            # pernas
+            #
+            # Se uma região está praticamente contida
+            # em outra, eliminamos o fragmento.
+            # ------------------------------------------------
+
+            contencao = calcular_contencao(
+                caixa_candidata,
+                caixa_existente
+            )
+
+            if (
+                contencao
+                >= PERCENTUAL_CONTENCAO
+            ):
+
+                area_candidata = (
+                    calcular_area_caixa(
+                        caixa_candidata
+                    )
+                )
+
+                area_existente = (
+                    calcular_area_caixa(
+                        caixa_existente
+                    )
+                )
+
+                menor = min(
+                    area_candidata,
+                    area_existente
+                )
+
+                maior = max(
+                    area_candidata,
+                    area_existente
+                )
+
+                proporcao = (
+                    menor
+                    / max(
+                        maior,
+                        1
+                    )
+                )
+
+                # Não removemos automaticamente
+                # objetos muito pequenos dentro de
+                # objetos muito grandes.
+                #
+                # Exemplo:
+                # pessoa sentada em cadeira.
+                #
+                # Mas removemos máscaras redundantes
+                # de tamanho semelhante.
+
+                if proporcao >= 0.25:
+
+                    repetido = True
+                    break
+
+        if not repetido:
+
+            resultado.append(
+                candidato
+            )
+
+    return resultado
+
+
+# ============================================================
+# DETECTAR REGIÕES
+# ============================================================
+
+def detectar_regioes(
+    frame
+):
+
+    if frame is None:
+        return []
+
+    if frame.size == 0:
+        return []
+
+    modelo = carregar_modelo_ambiente()
+
+    if modelo is None:
+        return []
+
+    altura_frame, largura_frame = (
+        frame.shape[:2]
+    )
+
+    # ========================================================
+    # FASTSAM
+    # ========================================================
+
+    try:
+
+        resultados = modelo(
+            frame,
+            device="cpu",
+            retina_masks=True,
+            imgsz=TAMANHO_ANALISE,
+            conf=CONFIANCA_MINIMA,
+            iou=IOU_MODELO,
+            verbose=False
+        )
+
+    except Exception as erro:
+
+        print(
+            "Erro na analise do ambiente: "
+            f"{erro}"
+        )
+
+        return []
+
+    candidatos = []
+
+    # ========================================================
+    # MÁSCARAS
+    # ========================================================
+
+    for resultado in resultados:
+
+        if resultado.masks is None:
+            continue
+
+        try:
+
+            mascaras = (
+                resultado
+                .masks
+                .data
+                .cpu()
+                .numpy()
+            )
+
+        except Exception:
+            continue
+
+        for mascara in mascaras:
+
+            objeto = mascara_para_objeto(
+                mascara,
+                largura_frame,
+                altura_frame
+            )
+
+            if objeto is None:
+                continue
+
+            candidatos.append(
+                objeto
+            )
+
+    # ========================================================
+    # REMOVER FRAGMENTOS
+    # ========================================================
+
+    candidatos = remover_fragmentacao(
+        candidatos
+    )
+
+    return candidatos
+
+
+# ============================================================
+# ANALISAR FRAME
 # ============================================================
 
 def analisar_frame(
@@ -325,22 +637,18 @@ def analisar_frame(
 ):
 
     if frame is None:
-
         return []
 
     if frame.size == 0:
-
         return []
 
     regioes = detectar_regioes(
         frame
     )
 
-    objetos = []
-
-    # ========================================================
-    # ORDENA PARA A NUMERAÇÃO NÃO FICAR COMPLETAMENTE ALEATÓRIA
-    # ========================================================
+    # Ordenação visual estável:
+    # cima → baixo
+    # esquerda → direita
 
     regioes = sorted(
         regioes,
@@ -349,6 +657,8 @@ def analisar_frame(
             objeto["bbox"][0]
         )
     )
+
+    objetos = []
 
     for indice, regiao in enumerate(
         regioes,
@@ -371,10 +681,10 @@ def analisar_frame(
                 f"Objeto {indice}",
 
             "bbox": [
-                x1,
-                y1,
-                x2,
-                y2
+                int(x1),
+                int(y1),
+                int(x2),
+                int(y2)
             ],
 
             "centro": [
@@ -387,7 +697,9 @@ def analisar_frame(
             ],
 
             "area":
-                regiao["area"],
+                int(
+                    regiao["area"]
+                ),
 
             "maquinario":
                 None,
@@ -406,12 +718,9 @@ def desenhar_objetos(
 ):
 
     if frame is None:
-
         return frame
 
-    frame_visual = (
-        frame.copy()
-    )
+    frame_visual = frame.copy()
 
     for objeto in objetos:
 
@@ -419,14 +728,21 @@ def desenhar_objetos(
             objeto["bbox"]
         )
 
+        # ----------------------------------------------------
+        # Usa o nome global quando ele já existir.
+        # Isso será importante na próxima etapa.
+        # ----------------------------------------------------
+
         nome = objeto.get(
-            "nome",
-            "Objeto"
+            "nome_global"
         )
 
-        # ====================================================
-        # CAIXA
-        # ====================================================
+        if not nome:
+
+            nome = objeto.get(
+                "nome",
+                "Objeto"
+            )
 
         cv2.rectangle(
             frame_visual,
@@ -435,10 +751,6 @@ def desenhar_objetos(
             (0, 255, 255),
             2
         )
-
-        # ====================================================
-        # FUNDO DO TEXTO
-        # ====================================================
 
         (
             largura_texto,
@@ -452,7 +764,9 @@ def desenhar_objetos(
 
         topo = max(
             0,
-            y1 - altura_texto - 12
+            y1
+            - altura_texto
+            - 12
         )
 
         cv2.rectangle(
@@ -465,16 +779,11 @@ def desenhar_objetos(
                 x1
                 + largura_texto
                 + 12,
-
                 y1
             ),
             (0, 0, 0),
             -1
         )
-
-        # ====================================================
-        # NOME
-        # ====================================================
 
         cv2.putText(
             frame_visual,
@@ -497,7 +806,7 @@ def desenhar_objetos(
 
 
 # ============================================================
-# CRIAR RESUMO DA CÂMERA
+# CRIAR RESUMO
 # ============================================================
 
 def criar_resumo_objetos(
@@ -508,8 +817,19 @@ def criar_resumo_objetos(
 
     for objeto in objetos:
 
+        nome = objeto.get(
+            "nome_global"
+        )
+
+        if not nome:
+
+            nome = objeto.get(
+                "nome",
+                "Objeto"
+            )
+
         resumo.append(
-            objeto["nome"]
+            nome
         )
 
     return resumo

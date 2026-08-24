@@ -18,6 +18,17 @@ from objetos_globais import (
     preparar_objetos_para_salvar
 )
 
+from decision_engine import (
+    processar_incidente,
+    atualizar_incidentes_ausentes,
+    criar_chave_incidente
+)
+
+from notificacoes import (
+    atualizar_notificacoes,
+    encerrar_notificacoes
+)
+
 
 # ============================================================
 # ESTADO
@@ -46,6 +57,28 @@ FRAMES_ANTES_CONFIGURACAO = 30
 
 
 # ============================================================
+# ESTABILIZACAO TEMPORAL DOS EPIs
+# ============================================================
+
+# Poucos frames para aceitar que o EPI apareceu.
+FRAMES_CONFIRMAR_EPI_PRESENTE = 3
+
+# Mais frames para aceitar uma ausência explícita.
+FRAMES_CONFIRMAR_EPI_AUSENTE = 8
+
+# Se o modelo não detectar nem presença nem ausência,
+# preservamos o último estado por um tempo para evitar
+# oscilação frame a frame.
+FRAMES_SEM_EVIDENCIA_PARA_AUSENCIA = 25
+
+estado_temporal_epis = {}
+
+# Detalhes da última inferência por câmera.
+# Usado para escolher a câmera/frame da foto de prova.
+detalhes_epis_cameras = {}
+
+
+# ============================================================
 # INTERFACE DE CONFIGURAÇÃO
 # ============================================================
 
@@ -54,6 +87,7 @@ NOME_JANELA_CONFIG = (
 )
 
 clique_mouse = None
+rolagem_mouse = 0
 
 
 # ============================================================
@@ -203,6 +237,7 @@ def evento_mouse(
 ):
 
     global clique_mouse
+    global rolagem_mouse
 
     if evento == cv2.EVENT_LBUTTONDOWN:
 
@@ -210,6 +245,20 @@ def evento_mouse(
             x,
             y
         )
+
+    elif evento == cv2.EVENT_MOUSEWHEEL:
+
+        try:
+            delta = cv2.getMouseWheelDelta(
+                flags
+            )
+        except Exception:
+            delta = flags
+
+        if delta > 0:
+            rolagem_mouse = -1
+        elif delta < 0:
+            rolagem_mouse = 1
 
 
 # ============================================================
@@ -774,49 +823,50 @@ def selecionar_maquinarios(
 ):
 
     global clique_mouse
+    global rolagem_mouse
 
     clique_mouse = None
+    rolagem_mouse = 0
 
     selecionados = set()
 
-    cv2.namedWindow(
-        NOME_JANELA_CONFIG
+    itens = sorted(
+        objetos_globais.items(),
+        key=lambda item: item[1].get("numero", 999999)
     )
 
-    cv2.setMouseCallback(
-        NOME_JANELA_CONFIG,
-        evento_mouse
-    )
+    largura_tela = 760
+    altura_tela = 600
+    topo_lista = 115
+    rodape = 100
+    altura_item = 52
+
+    x_lista_inicio = 30
+    x_lista_fim = 690
+    x_barra_inicio = 710
+    x_barra_fim = 728
+
+    area_lista = altura_tela - topo_lista - rodape
+    itens_por_pagina = max(1, area_lista // altura_item)
+    max_offset = max(0, len(itens) - itens_por_pagina)
+    offset = 0
+
+    cv2.namedWindow(NOME_JANELA_CONFIG, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(NOME_JANELA_CONFIG, largura_tela, altura_tela)
+    cv2.setMouseCallback(NOME_JANELA_CONFIG, evento_mouse)
 
     while True:
 
-        altura = max(
-            550,
-            180
-            + len(
-                objetos_globais
-            ) * 55
-        )
-
-        altura = min(
-            altura,
-            850
-        )
+        if rolagem_mouse != 0:
+            offset += rolagem_mouse
+            offset = max(0, min(max_offset, offset))
+            rolagem_mouse = 0
 
         tela = np.zeros(
-            (
-                altura,
-                760,
-                3
-            ),
+            (altura_tela, largura_tela, 3),
             dtype=np.uint8
         )
-
-        tela[:] = (
-            28,
-            28,
-            28
-        )
+        tela[:] = (28, 28, 28)
 
         cv2.putText(
             tela,
@@ -832,7 +882,7 @@ def selecionar_maquinarios(
         cv2.putText(
             tela,
             "Quais objetos sao maquinarios?",
-            (30, 80),
+            (30, 78),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.56,
             (0, 220, 255),
@@ -840,61 +890,118 @@ def selecionar_maquinarios(
             cv2.LINE_AA
         )
 
+        cv2.putText(
+            tela,
+            "Role o mouse, use W/S ou clique na barra",
+            (30, 103),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (170, 170, 170),
+            1,
+            cv2.LINE_AA
+        )
+
         botoes = {}
+        visiveis = itens[offset:offset + itens_por_pagina]
+        y = topo_lista
 
-        y = 110
-
-        for (
-            objeto_id,
-            objeto
-        ) in objetos_globais.items():
+        for objeto_id, objeto in visiveis:
 
             cameras_texto = ", ".join(
-                [
-                    f"CAM {camera + 1:02d}"
-                    for camera
-                    in objeto.get(
-                        "cameras",
-                        []
-                    )
-                ]
+                f"CAM {camera + 1:02d}"
+                for camera in objeto.get("cameras", [])
             )
 
-            texto = (
-                f"{objeto['nome']} "
-                f"({cameras_texto})"
-            )
+            nome_global = objeto.get("nome", objeto_id)
+            texto = f"{nome_global}  |  {cameras_texto}"
 
             caixa = (
-                30,
+                x_lista_inicio,
                 y,
-                720,
+                x_lista_fim,
                 y + 42
             )
 
-            botoes[
-                objeto_id
-            ] = caixa
+            botoes[objeto_id] = caixa
 
             desenhar_botao(
                 tela,
                 texto,
                 caixa,
-                objeto_id
-                in selecionados
+                objeto_id in selecionados
             )
 
-            y += 52
+            y += altura_item
 
-            if y > altura - 100:
+        # Barra de rolagem visível.
+        y_barra_inicio = topo_lista
+        y_barra_fim = topo_lista + area_lista - 5
 
-                break
+        cv2.rectangle(
+            tela,
+            (x_barra_inicio, y_barra_inicio),
+            (x_barra_fim, y_barra_fim),
+            (65, 65, 65),
+            -1
+        )
 
+        if len(itens) > itens_por_pagina:
+
+            altura_trilho = y_barra_fim - y_barra_inicio
+
+            altura_cursor = max(
+                45,
+                int(
+                    altura_trilho
+                    * itens_por_pagina
+                    / len(itens)
+                )
+            )
+
+            espaco_cursor = max(
+                1,
+                altura_trilho - altura_cursor
+            )
+
+            proporcao = (
+                offset / max_offset
+                if max_offset > 0
+                else 0
+            )
+
+            y_cursor = (
+                y_barra_inicio
+                + int(proporcao * espaco_cursor)
+            )
+
+            cv2.rectangle(
+                tela,
+                (x_barra_inicio + 2, y_cursor),
+                (x_barra_fim - 2, y_cursor + altura_cursor),
+                (180, 180, 180),
+                -1
+            )
+
+        inicio = offset + 1 if itens else 0
+        fim = min(len(itens), offset + itens_por_pagina)
+
+        cv2.putText(
+            tela,
+            f"Objetos {inicio}-{fim} de {len(itens)}",
+            (30, altura_tela - 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (170, 170, 170),
+            1,
+            cv2.LINE_AA
+        )
+
+        # Fixo no rodapé da janela.
         confirmar = (
             500,
-            altura - 65,
+            altura_tela - 75,
             720,
-            altura - 20
+            altura_tela - 25
         )
 
         desenhar_botao(
@@ -904,75 +1011,56 @@ def selecionar_maquinarios(
             True
         )
 
-        cv2.imshow(
-            NOME_JANELA_CONFIG,
-            tela
-        )
+        cv2.imshow(NOME_JANELA_CONFIG, tela)
 
-        tecla = (
-            cv2.waitKey(20)
-            & 0xFF
-        )
+        tecla = cv2.waitKey(20) & 0xFF
 
         if tecla == ord("q"):
-
             return None
 
-        if clique_mouse is None:
+        if tecla in (ord("s"), 84):
+            offset = min(max_offset, offset + 1)
 
+        elif tecla in (ord("w"), 82):
+            offset = max(0, offset - 1)
+
+        if clique_mouse is None:
             continue
 
         clique = clique_mouse
-
         clique_mouse = None
 
-        for (
-            objeto_id,
-            caixa
-        ) in botoes.items():
+        for objeto_id, caixa in botoes.items():
 
-            if ponto_dentro(
-                clique,
-                caixa
-            ):
+            if ponto_dentro(clique, caixa):
 
-                if (
-                    objeto_id
-                    in selecionados
-                ):
-
-                    selecionados.remove(
-                        objeto_id
-                    )
-
+                if objeto_id in selecionados:
+                    selecionados.remove(objeto_id)
                 else:
+                    selecionados.add(objeto_id)
 
-                    selecionados.add(
-                        objeto_id
-                    )
-
-        if ponto_dentro(
-            clique,
-            confirmar
+        # Clique na barra move a lista.
+        if (
+            x_barra_inicio <= clique[0] <= x_barra_fim
+            and y_barra_inicio <= clique[1] <= y_barra_fim
+            and max_offset > 0
         ):
 
+            proporcao = (
+                (clique[1] - y_barra_inicio)
+                / max(1, y_barra_fim - y_barra_inicio)
+            )
+
+            offset = int(round(proporcao * max_offset))
+            offset = max(0, min(max_offset, offset))
+
+        if ponto_dentro(clique, confirmar):
             break
 
-    for (
-        objeto_id,
-        objeto
-    ) in objetos_globais.items():
-
-        objeto[
-            "maquinario"
-        ] = (
-            objeto_id
-            in selecionados
-        )
+    for objeto_id, objeto in objetos_globais.items():
+        objeto["maquinario"] = objeto_id in selecionados
 
     return objetos_globais
-
-
 # ============================================================
 # SELECIONAR EPIs
 # ============================================================
@@ -1424,27 +1512,21 @@ def analisar_epis_cameras(
     frames
 ):
 
-    obrigatorios = getattr(
-        config,
-        "EPIS_OBRIGATORIOS",
-        []
+    global detalhes_epis_cameras
+
+    obrigatorios = list(
+        getattr(
+            config,
+            "EPIS_OBRIGATORIOS",
+            []
+        )
     )
 
-    # --------------------------------------------------------
-    # Guarda presença e ausência por todas as câmeras.
-    # --------------------------------------------------------
+    if not obrigatorios:
 
-    encontrou_presenca = {
+        detalhes_epis_cameras = {}
 
-        epi: False
-        for epi in obrigatorios
-    }
-
-    encontrou_ausencia = {
-
-        epi: False
-        for epi in obrigatorios
-    }
+        return {}
 
     modelo = carregar_modelo_epi()
 
@@ -1454,15 +1536,57 @@ def analisar_epis_cameras(
     ):
 
         return {
-
-            epi: False
+            epi: estado_temporal_epis.get(
+                epi,
+                {}
+            ).get(
+                "status",
+                False
+            )
             for epi in obrigatorios
         }
 
-    for (
-        camera,
-        frame
-    ) in frames:
+    # --------------------------------------------------------
+    # Evidência agregada entre todas as câmeras.
+    #
+    # Regra principal:
+    # se QUALQUER câmera enxergar o EPI presente,
+    # a presença vence a ausência de outra câmera.
+    # --------------------------------------------------------
+
+    presenca_global = {
+        epi: False
+        for epi in obrigatorios
+    }
+
+    ausencia_explicita_global = {
+        epi: False
+        for epi in obrigatorios
+    }
+
+    detalhes_epis_cameras = {}
+
+    for camera, frame in frames:
+
+        detalhes_camera = {
+            "camera":
+                camera,
+
+            "frame":
+                frame,
+
+            "presentes":
+                set(),
+
+            "ausentes":
+                set(),
+
+            "confiancas_presenca":
+                {},
+
+            "confiancas_ausencia":
+                {},
+        }
 
         try:
 
@@ -1490,14 +1614,15 @@ def analisar_epis_cameras(
                 f"{erro}"
             )
 
-            continue
+            detalhes_epis_cameras[
+                camera.camera_id
+            ] = detalhes_camera
 
-        classes = set()
+            continue
 
         for resultado in resultados:
 
             if resultado.boxes is None:
-
                 continue
 
             for box in resultado.boxes:
@@ -1506,74 +1631,367 @@ def analisar_epis_cameras(
                     box.cls[0]
                 )
 
-                nome_classe = (
+                nome_classe = str(
                     resultado.names[
                         classe_id
                     ]
                 )
 
-                classes.add(
-                    nome_classe
-                )
+                confianca = 0.0
 
-        for epi in obrigatorios:
+                try:
 
-            for (
-                classe,
-                nome
-            ) in EPIS_PRESENCA.items():
+                    confianca = float(
+                        box.conf[0]
+                    )
 
-                if (
-                    nome == epi
-                    and classe in classes
-                ):
+                except Exception:
 
-                    encontrou_presenca[
-                        epi
-                    ] = True
+                    pass
 
-            for (
-                classe,
-                nome
-            ) in EPIS_AUSENCIA.items():
+                # --------------------------------------------
+                # PRESENÇA
+                # --------------------------------------------
 
-                if (
-                    nome == epi
-                    and classe in classes
-                ):
+                if nome_classe in EPIS_PRESENCA:
 
-                    encontrou_ausencia[
-                        epi
-                    ] = True
+                    epi = EPIS_PRESENCA[
+                        nome_classe
+                    ]
 
-    status = {}
+                    if epi in obrigatorios:
+
+                        detalhes_camera[
+                            "presentes"
+                        ].add(
+                            epi
+                        )
+
+                        detalhes_camera[
+                            "confiancas_presenca"
+                        ][epi] = max(
+                            confianca,
+                            detalhes_camera[
+                                "confiancas_presenca"
+                            ].get(
+                                epi,
+                                0.0
+                            )
+                        )
+
+                        presenca_global[
+                            epi
+                        ] = True
+
+                # --------------------------------------------
+                # AUSÊNCIA EXPLÍCITA
+                # --------------------------------------------
+
+                if nome_classe in EPIS_AUSENCIA:
+
+                    epi = EPIS_AUSENCIA[
+                        nome_classe
+                    ]
+
+                    if epi in obrigatorios:
+
+                        detalhes_camera[
+                            "ausentes"
+                        ].add(
+                            epi
+                        )
+
+                        detalhes_camera[
+                            "confiancas_ausencia"
+                        ][epi] = max(
+                            confianca,
+                            detalhes_camera[
+                                "confiancas_ausencia"
+                            ].get(
+                                epi,
+                                0.0
+                            )
+                        )
+
+                        ausencia_explicita_global[
+                            epi
+                        ] = True
+
+        detalhes_epis_cameras[
+            camera.camera_id
+        ] = detalhes_camera
+
+    status_final = {}
 
     for epi in obrigatorios:
 
-        # Ausência explícita tem prioridade.
-        if encontrou_ausencia[
+        estado = estado_temporal_epis.setdefault(
+            epi,
+            {
+                "status":
+                    False,
+
+                "frames_presente":
+                    0,
+
+                "frames_ausente":
+                    0,
+
+                "frames_sem_evidencia":
+                    0,
+            }
+        )
+
+        tem_presenca = presenca_global[
             epi
-        ]:
+        ]
 
-            status[
+        # Se uma câmera detectou presença, ela vence.
+        tem_ausencia_explicita = (
+            not tem_presenca
+            and
+            ausencia_explicita_global[
                 epi
-            ] = False
+            ]
+        )
 
-        elif encontrou_presenca[
-            epi
-        ]:
+        if tem_presenca:
 
-            status[
-                epi
-            ] = True
+            estado[
+                "frames_presente"
+            ] += 1
+
+            estado[
+                "frames_ausente"
+            ] = 0
+
+            estado[
+                "frames_sem_evidencia"
+            ] = 0
+
+            if (
+                estado[
+                    "frames_presente"
+                ]
+                >= FRAMES_CONFIRMAR_EPI_PRESENTE
+            ):
+
+                estado[
+                    "status"
+                ] = True
+
+        elif tem_ausencia_explicita:
+
+            estado[
+                "frames_ausente"
+            ] += 1
+
+            estado[
+                "frames_presente"
+            ] = 0
+
+            estado[
+                "frames_sem_evidencia"
+            ] = 0
+
+            if (
+                estado[
+                    "frames_ausente"
+                ]
+                >= FRAMES_CONFIRMAR_EPI_AUSENTE
+            ):
+
+                estado[
+                    "status"
+                ] = False
 
         else:
 
-            status[
-                epi
-            ] = False
+            # Nenhuma evidência confiável neste frame.
+            # Não mudamos imediatamente o status.
+            estado[
+                "frames_sem_evidencia"
+            ] += 1
 
-    return status
+            estado[
+                "frames_presente"
+            ] = max(
+                0,
+                estado[
+                    "frames_presente"
+                ] - 1
+            )
+
+            estado[
+                "frames_ausente"
+            ] = max(
+                0,
+                estado[
+                    "frames_ausente"
+                ] - 1
+            )
+
+            # Se estava em uso e desapareceu por bastante
+            # tempo em TODAS as câmeras, passa a ausente.
+            if (
+                estado[
+                    "status"
+                ]
+                and
+                estado[
+                    "frames_sem_evidencia"
+                ]
+                >= FRAMES_SEM_EVIDENCIA_PARA_AUSENCIA
+            ):
+
+                estado[
+                    "status"
+                ] = False
+
+        status_final[
+            epi
+        ] = bool(
+            estado[
+                "status"
+            ]
+        )
+
+    return status_final
+
+# ============================================================
+# INCIDENTES DE EPI
+# ============================================================
+
+def processar_incidentes_epis(
+    status_epis,
+    frames,
+    operador
+):
+
+    obrigatorios = list(
+        getattr(
+            config,
+            "EPIS_OBRIGATORIOS",
+            []
+        )
+    )
+
+    ambiente = getattr(
+        config,
+        "NOME_AMBIENTE",
+        "Ambiente Principal"
+    )
+
+    # Até a biometria ser integrada ao main,
+    # usamos uma matrícula estável para não criar
+    # uma chave diferente a cada frame.
+    matricula = "DESCONHECIDO"
+
+    chaves_detectadas = set()
+
+    if not frames:
+
+        atualizar_incidentes_ausentes(
+            chaves_detectadas
+        )
+
+        return
+
+    for epi in obrigatorios:
+
+        presente = bool(
+            status_epis.get(
+                epi,
+                False
+            )
+        )
+
+        if presente:
+            continue
+
+        # ----------------------------------------------------
+        # Escolhe preferencialmente uma câmera que tenha
+        # detectado explicitamente a ausência deste EPI.
+        # Se não houver, usa a primeira câmera disponível.
+        # ----------------------------------------------------
+
+        camera_escolhida = None
+        frame_escolhido = None
+        melhor_confianca = -1.0
+
+        for (
+            camera_id,
+            detalhes
+        ) in detalhes_epis_cameras.items():
+
+            if epi in detalhes.get(
+                "ausentes",
+                set()
+            ):
+
+                confianca = detalhes.get(
+                    "confiancas_ausencia",
+                    {}
+                ).get(
+                    epi,
+                    0.0
+                )
+
+                if confianca > melhor_confianca:
+
+                    camera_escolhida = detalhes.get(
+                        "camera"
+                    )
+
+                    frame_escolhido = detalhes.get(
+                        "frame"
+                    )
+
+                    melhor_confianca = confianca
+
+        if camera_escolhida is None:
+
+            camera_escolhida, frame_escolhido = (
+                frames[0]
+            )
+
+        camera_id = getattr(
+            camera_escolhida,
+            "camera_id",
+            None
+        )
+
+        camera_nome = getattr(
+            camera_escolhida,
+            "nome",
+            "Camera"
+        )
+
+        chave = criar_chave_incidente(
+            camera_id,
+            matricula,
+            epi
+        )
+
+        chaves_detectadas.add(
+            chave
+        )
+
+        processar_incidente(
+            camera_id=camera_id,
+            camera_nome=camera_nome,
+            ambiente=ambiente,
+            matricula=matricula,
+            operador=operador,
+            tipo_infracao=epi,
+            severidade="ALTA",
+            frame=frame_escolhido
+        )
+
+    # Remove/reset incidentes que deixaram de existir.
+    atualizar_incidentes_ausentes(
+        chaves_detectadas
+    )
 
 
 # ============================================================
@@ -1762,30 +2180,22 @@ def criar_painel(
     )
 
     painel = np.zeros(
-        (
-            altura,
-            largura,
-            3
-        ),
+        (altura, largura, 3),
         dtype=np.uint8
     )
 
-    painel[:] = (
-        28,
-        28,
-        28
-    )
+    painel[:] = (28, 28, 28)
 
     # ========================================================
-    # CABEÇALHO
+    # CABECALHO
     # ========================================================
 
     cv2.putText(
         painel,
         "STATUS DOS EPIs",
-        (20, 38),
+        (16, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.62,
+        0.58,
         (255, 255, 255),
         2,
         cv2.LINE_AA
@@ -1793,11 +2203,8 @@ def criar_painel(
 
     cv2.line(
         painel,
-        (20, 55),
-        (
-            largura - 20,
-            55
-        ),
+        (16, 40),
+        (largura - 16, 40),
         (80, 80, 80),
         1
     )
@@ -1809,33 +2216,25 @@ def criar_painel(
     cv2.putText(
         painel,
         "OPERADOR",
-        (20, 90),
+        (16, 62),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
+        0.34,
         (160, 160, 160),
         1,
         cv2.LINE_AA
     )
 
-    operador_tela = str(
-        operador
-    )
+    operador_tela = str(operador)
 
-    if len(
-        operador_tela
-    ) > 28:
-
-        operador_tela = (
-            operador_tela[:28]
-            + "..."
-        )
+    if len(operador_tela) > 30:
+        operador_tela = operador_tela[:30] + "..."
 
     cv2.putText(
         painel,
         operador_tela,
-        (20, 120),
+        (16, 84),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
+        0.42,
         (255, 255, 255),
         1,
         cv2.LINE_AA
@@ -1848,9 +2247,9 @@ def criar_painel(
     cv2.putText(
         painel,
         "SEVERIDADE",
-        (20, 160),
+        (16, 108),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
+        0.34,
         (160, 160, 160),
         1,
         cv2.LINE_AA
@@ -1866,20 +2265,12 @@ def criar_painel(
     cv2.putText(
         painel,
         severidade,
-        (20, 190),
+        (16, 132),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.46,
         cor_severidade,
         2,
         cv2.LINE_AA
-    )
-
-    cv2.line(
-        painel,
-        (20, 212),
-        (largura - 20, 212),
-        (80, 80, 80),
-        1
     )
 
     # ========================================================
@@ -1889,9 +2280,9 @@ def criar_painel(
     cv2.putText(
         painel,
         "ESTADO",
-        (20, 245),
+        (16, 158),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
+        0.34,
         (160, 160, 160),
         1,
         cv2.LINE_AA
@@ -1912,9 +2303,9 @@ def criar_painel(
     cv2.putText(
         painel,
         texto_estado,
-        (20, 275),
+        (16, 182),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.45,
+        0.42,
         cor_estado,
         2,
         cv2.LINE_AA
@@ -1922,108 +2313,134 @@ def criar_painel(
 
     cv2.line(
         painel,
-        (20, 300),
-        (largura - 20, 300),
+        (16, 196),
+        (largura - 16, 196),
         (80, 80, 80),
         1
     )
 
     # ========================================================
-    # EPIs
+    # EPIs OBRIGATORIOS
     # ========================================================
 
     cv2.putText(
         painel,
         "EPIs OBRIGATORIOS",
-        (20, 335),
+        (16, 218),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
+        0.34,
         (160, 160, 160),
         1,
         cv2.LINE_AA
     )
 
-    y = 375
-
-    epis_obrigatorios = getattr(
-        config,
-        "EPIS_OBRIGATORIOS",
-        []
-    )
-
-    if not epis_obrigatorios:
-        cv2.putText(
-            painel,
-            "Nenhum EPI configurado",
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (150, 150, 150),
-            1,
-            cv2.LINE_AA
+    epis_obrigatorios = list(
+        getattr(
+            config,
+            "EPIS_OBRIGATORIOS",
+            []
         )
-        return painel
+    )
 
     if status_epis is None:
         status_epis = {}
 
-    for epi in epis_obrigatorios:
-        presente = status_epis.get(epi, False)
+    y = 246
 
-        if presente:
-            texto_status = "OK"
-            cor_status = (0, 200, 0)
-        else:
-            texto_status = "FALTA"
-            cor_status = (0, 0, 255)
+    if not epis_obrigatorios:
 
         cv2.putText(
             painel,
-            epi,
-            (20, y),
+            "Nenhum EPI selecionado",
+            (16, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
-            (255, 255, 255),
+            0.38,
+            (150, 150, 150),
             1,
             cv2.LINE_AA
         )
 
-        tamanho, _ = cv2.getTextSize(
-            texto_status,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            2
+        return painel
+
+    # Ajusta automaticamente o espacamento conforme a altura.
+    espaco_disponivel = max(
+        1,
+        altura - y - 8
+    )
+
+    passo = min(
+        38,
+        max(
+            22,
+            espaco_disponivel // max(
+                1,
+                len(epis_obrigatorios)
+            )
+        )
+    )
+
+    for epi in epis_obrigatorios:
+
+        if y > altura - 8:
+            break
+
+        presente = bool(
+            status_epis.get(
+                epi,
+                False
+            )
         )
 
-        x_status = largura - tamanho[0] - 25
+        if presente:
+            texto_status = "EM USO"
+            cor_epi = (0, 200, 0)
+        else:
+            texto_status = "NAO EM USO"
+            cor_epi = (0, 0, 255)
+
+        # Nome do EPI na propria cor do status.
+        cv2.putText(
+            painel,
+            epi,
+            (16, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.39,
+            cor_epi,
+            2,
+            cv2.LINE_AA
+        )
+
+        tamanho_status, _ = cv2.getTextSize(
+            texto_status,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            1
+        )
+
+        x_status = largura - tamanho_status[0] - 16
 
         cv2.putText(
             painel,
             texto_status,
             (x_status, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            cor_status,
-            2,
+            0.34,
+            cor_epi,
+            1,
             cv2.LINE_AA
         )
 
         cv2.line(
             painel,
-            (20, y + 15),
-            (largura - 20, y + 15),
-            (65, 65, 65),
+            (16, y + 8),
+            (largura - 16, y + 8),
+            (60, 60, 60),
             1
         )
 
-        y += 48
-
-        if y > altura - 20:
-            break
+        y += passo
 
     return painel
-
-
 # ============================================================
 # MAIN
 # ============================================================
@@ -2115,9 +2532,25 @@ def main():
                 frames_visuais = frames
 
                 if frames:
-                    status_epis = analisar_epis_cameras(frames)
+                    status_epis = analisar_epis_cameras(
+                        frames
+                    )
+
                     severidade = calcular_severidade_epi(
                         status_epis
+                    )
+
+                    processar_incidentes_epis(
+                        status_epis,
+                        frames,
+                        operador
+                    )
+
+                    atualizar_notificacoes(
+                        status_epis=status_epis,
+                        frames=frames,
+                        operador=operador,
+                        severidade=severidade
                     )
 
             # =================================================
@@ -2189,6 +2622,13 @@ def main():
                 break
 
     finally:
+
+        try:
+            encerrar_notificacoes()
+        except Exception as erro:
+            print(
+                f"⚠️ Erro ao encerrar notificações: {erro}"
+            )
 
         for camera in list(
             cameras.values()

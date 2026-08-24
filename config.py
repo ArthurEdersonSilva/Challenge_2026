@@ -733,3 +733,34 @@ carregar_configuracoes()
 if __name__ == "__main__":
 
     mostrar_configuracao()
+
+# ============================================================
+# NOTIFICACOES
+# ============================================================
+
+ATIVAR_ALERTA_AUDIO = True
+ATIVAR_ALERTA_EMAIL = True
+
+INTERVALO_AUDIO_SEGUNDOS = 7
+TEMPO_EMAIL_SEGUNDOS = 15
+
+
+# ============================================================
+# EMAIL
+# ============================================================
+
+SMTP_SERVIDOR = "smtp.gmail.com"
+SMTP_PORTA = 587
+SMTP_USAR_TLS = True
+
+# Email que envia os alertas
+SMTP_USUARIO = "arthur.ederson.ae@gmail.com"
+
+# Senha de app do Gmail - NÃO é a senha normal
+SMTP_SENHA = "wxhq kctv qoxr gyyw"
+
+# Remetente
+SMTP_REMETENTE = SMTP_USUARIO
+
+# Email que recebe os alertas
+EMAIL_ALERTA_DESTINO = "arthur.ederson.ae@gmail.com"
