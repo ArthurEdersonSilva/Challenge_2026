@@ -47,44 +47,236 @@ TAMANHO_IMAGEM = 640
 # ============================================================
 
 LARGURA_CAM = 640
-
 ALTURA_CAM = 480
 
 MAX_CAMERAS = 66
 
+# ------------------------------------------------------------
+# CONFIGURAÇÃO WIFI
+# ------------------------------------------------------------
 
-CAMERAS = {}
+PASTA_CAMERA_WIFI = "camera_wifi"
 
+PATH_CAMERAS_WIFI = os.path.join(
+    PASTA_CAMERA_WIFI,
+    "cameras_wifi.json"
+)
 
-for camera_id in range(MAX_CAMERAS):
-
-    CAMERAS[camera_id] = {
-
-        "nome": f"Camera {camera_id + 1:02d}",
-
-        "fonte": camera_id,
-
-        # Todas ficam disponíveis para tentativa.
-        # O main.py verifica automaticamente
-        # quais realmente existem e consegue abrir.
-        "ativa": True,
-    }
+# Informa qual modo foi carregado.
+# Valores possíveis: "wifi" ou "usb"
+MODO_CAMERAS = "usb"
 
 
 # ============================================================
-# CÂMERAS RTSP
-#
-# Caso futuramente seja necessário adicionar uma câmera IP,
-# basta substituir a fonte correspondente.
-#
-# Exemplo:
-#
-# CAMERAS[10]["fonte"] = (
-#     "rtsp://usuario:senha@192.168.0.20:554/stream"
-# )
+# CARREGAR CÂMERAS WIFI
 # ============================================================
 
+def carregar_cameras_wifi():
 
+    if not os.path.exists(
+        PATH_CAMERAS_WIFI
+    ):
+
+        return {}
+
+    try:
+
+        with open(
+            PATH_CAMERAS_WIFI,
+            "r",
+            encoding="utf-8"
+        ) as arquivo:
+
+            dados = json.load(
+                arquivo
+            )
+
+    except Exception as erro:
+
+        print(
+            f"⚠️ Erro ao carregar câmeras WiFi: "
+            f"{erro}"
+        )
+
+        return {}
+
+    cameras_salvas = dados.get(
+        "cameras",
+        []
+    )
+
+    if not isinstance(
+        cameras_salvas,
+        list
+    ):
+
+        return {}
+
+    cameras = {}
+
+    proximo_id = 0
+
+    for item in cameras_salvas:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            continue
+
+        if not item.get(
+            "ativa",
+            True
+        ):
+
+            continue
+
+        fonte = item.get(
+            "fonte"
+        )
+
+        if not fonte:
+
+            continue
+
+        nome = item.get(
+            "nome"
+        )
+
+        if not nome:
+
+            nome = (
+                f"Camera WiFi "
+                f"{proximo_id + 1:02d}"
+            )
+
+        cameras[
+            proximo_id
+        ] = {
+
+            "nome":
+                nome,
+
+            "fonte":
+                fonte,
+
+            "tipo":
+                item.get(
+                    "tipo",
+                    "wifi"
+                ),
+
+            "ip":
+                item.get(
+                    "ip"
+                ),
+
+            "ativa":
+                True,
+
+            "onvif":
+                item.get(
+                    "onvif",
+                    False
+                ),
+
+            "resolucao":
+                item.get(
+                    "resolucao"
+                ),
+
+            "fps":
+                item.get(
+                    "fps"
+                ),
+        }
+
+        proximo_id += 1
+
+    return cameras
+
+
+# ============================================================
+# CRIAR CÂMERAS USB PADRÃO
+# ============================================================
+
+def criar_cameras_usb():
+
+    cameras = {}
+
+    for camera_id in range(
+        MAX_CAMERAS
+    ):
+
+        cameras[
+            camera_id
+        ] = {
+
+            "nome":
+                f"Camera "
+                f"{camera_id + 1:02d}",
+
+            "fonte":
+                camera_id,
+
+            "tipo":
+                "usb",
+
+            # Todas ficam disponíveis para tentativa.
+            # O main.py mantém somente as que realmente
+            # conseguem abrir.
+            "ativa":
+                True,
+        }
+
+    return cameras
+
+
+# ============================================================
+# ESCOLHER FONTE DAS CÂMERAS
+#
+# REGRA:
+#
+# 1. Se camera_wifi/cameras_wifi.json possuir pelo menos
+#    uma câmera válida, usa SOMENTE as câmeras WiFi/IP.
+#
+# 2. Se o arquivo não existir, estiver vazio ou inválido,
+#    mantém o comportamento atual e procura câmeras USB.
+# ============================================================
+
+_cameras_wifi = carregar_cameras_wifi()
+
+if _cameras_wifi:
+
+    CAMERAS = _cameras_wifi
+
+    MODO_CAMERAS = "wifi"
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " MODO DE CÂMERAS: WIFI / IP"
+    )
+    print(
+        "=========================================="
+    )
+    print(
+        f"Câmeras configuradas: "
+        f"{len(CAMERAS)}"
+    )
+    print(
+        "=========================================="
+    )
+    print()
+
+else:
+
+    CAMERAS = criar_cameras_usb()
+
+    MODO_CAMERAS = "usb"
 # ============================================================
 # EPIs DISPONÍVEIS
 #
@@ -698,8 +890,8 @@ def mostrar_configuracao():
     )
 
     print(
-        "Descoberta de câmeras: "
-        "AUTOMÁTICA"
+        f"Modo de câmeras: "
+        f"{MODO_CAMERAS.upper()}"
     )
 
     print(

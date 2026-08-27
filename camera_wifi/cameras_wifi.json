@@ -1,0 +1,23 @@
+{
+    "versao": 1,
+    "atualizado_em": "2026-08-27 02:02:32",
+    "modo": "wifi",
+    "cameras": [
+        {
+            "nome": "teste",
+            "tipo": "rtsp",
+            "fonte": "rtsp://user:280534@192.168.0.2:1935/",
+            "ip": "192.168.0.2",
+            "ativa": true,
+            "onvif": false,
+            "portas_detectadas": [
+                1935
+            ],
+            "resolucao": {
+                "largura": 2160,
+                "altura": 3840
+            },
+            "fps": null
+        }
+    ]
+}

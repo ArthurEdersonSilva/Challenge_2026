@@ -384,6 +384,12 @@ class CameraSistema:
 
         self.total_objetos = 0
 
+        # True para RTSP/HTTP; False para câmera USB.
+        self.tipo_rede = not isinstance(
+            self.fonte,
+            int
+        )
+
 
     # ========================================================
     # ABRIR
@@ -395,21 +401,52 @@ class CameraSistema:
 
         try:
 
-            if isinstance(
-                self.fonte,
-                int
-            ):
+            # =================================================
+            # USB
+            # =================================================
+
+            if not self.tipo_rede:
 
                 self.cap = cv2.VideoCapture(
                     self.fonte,
                     cv2.CAP_DSHOW
                 )
 
+            # =================================================
+            # WIFI / IP / RTSP / HTTP
+            # =================================================
+
             else:
 
-                self.cap = cv2.VideoCapture(
+                # Preferência para RTSP via TCP.
+                # Ajuda a evitar perda/corrupção de frames
+                # em streams de rede.
+                if str(
                     self.fonte
+                ).lower().startswith(
+                    "rtsp://"
+                ):
+
+                    os.environ[
+                        "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+                    ] = (
+                        "rtsp_transport;tcp"
+                    )
+
+                self.cap = cv2.VideoCapture(
+                    self.fonte,
+                    cv2.CAP_FFMPEG
                 )
+
+                # Fallback caso o backend FFmpeg explícito
+                # não consiga abrir determinada câmera.
+                if not self.cap.isOpened():
+
+                    self.cap.release()
+
+                    self.cap = cv2.VideoCapture(
+                        self.fonte
+                    )
 
         except Exception:
 
@@ -430,24 +467,43 @@ class CameraSistema:
 
             return False
 
-        self.cap.set(
-            cv2.CAP_PROP_FRAME_WIDTH,
-            getattr(
-                config,
-                "LARGURA_CAM",
-                640
-            )
-        )
+        # Buffer mínimo para reduzir atraso em câmera de rede.
+        if self.tipo_rede:
 
-        self.cap.set(
-            cv2.CAP_PROP_FRAME_HEIGHT,
-            getattr(
-                config,
-                "ALTURA_CAM",
-                480
-            )
-        )
+            try:
 
+                self.cap.set(
+                    cv2.CAP_PROP_BUFFERSIZE,
+                    1
+                )
+
+            except Exception:
+
+                pass
+
+        else:
+
+            self.cap.set(
+                cv2.CAP_PROP_FRAME_WIDTH,
+                getattr(
+                    config,
+                    "LARGURA_CAM",
+                    640
+                )
+            )
+
+            self.cap.set(
+                cv2.CAP_PROP_FRAME_HEIGHT,
+                getattr(
+                    config,
+                    "ALTURA_CAM",
+                    480
+                )
+            )
+
+        # Para validar a câmera usamos read().
+        # É a mesma forma que funcionou no teste isolado
+        # do stream RTSP.
         sucesso, frame = (
             self.cap.read()
         )
@@ -470,9 +526,15 @@ class CameraSistema:
 
         self.falhas_consecutivas = 0
 
+        tipo_fonte = (
+            "WIFI/IP"
+            if self.tipo_rede
+            else "USB"
+        )
+
         print(
             f"✅ {self.nome} encontrada "
-            f"(indice {self.camera_id})"
+            f"({tipo_fonte})"
         )
 
         return True
@@ -490,6 +552,13 @@ class CameraSistema:
         ):
 
             return False
+
+        # Em streams RTSP/HTTP usamos read() diretamente
+        # no retrieve(). Isso evita problemas observados
+        # com grab/retrieve em alguns decodificadores.
+        if self.tipo_rede:
+
+            return True
 
         try:
 
@@ -521,9 +590,17 @@ class CameraSistema:
 
         try:
 
-            sucesso, frame = (
-                self.cap.retrieve()
-            )
+            if self.tipo_rede:
+
+                sucesso, frame = (
+                    self.cap.read()
+                )
+
+            else:
+
+                sucesso, frame = (
+                    self.cap.retrieve()
+                )
 
         except Exception:
 
@@ -581,36 +658,23 @@ class CameraSistema:
 
 
 # ============================================================
-# DESCOBRIR CÂMERAS
+# ABRIR CÂMERAS A PARTIR DE UMA CONFIGURAÇÃO
 # ============================================================
 
-def descobrir_cameras():
+def abrir_cameras_configuradas(
+    configuracoes,
+    modo
+):
 
     cameras = {}
 
-    print()
-    print(
-        "=========================================="
-    )
-    print(
-        " PROCURANDO CAMERAS DISPONIVEIS"
-    )
-    print(
-        "=========================================="
-    )
+    for camera_id, dados in configuracoes.items():
 
-    for camera_id in range(
-        MAX_INDICES_CAMERA
-    ):
-
-        dados = getattr(
-            config,
-            "CAMERAS",
-            {}
-        ).get(
-            camera_id,
-            {}
-        )
+        if not dados.get(
+            "ativa",
+            True
+        ):
+            continue
 
         fonte = dados.get(
             "fonte",
@@ -634,12 +698,201 @@ def descobrir_cameras():
                 camera_id
             ] = camera
 
+    return cameras
+
+
+# ============================================================
+# DESCOBRIR CÂMERAS
+# ============================================================
+
+def descobrir_cameras():
+
+    modo = getattr(
+        config,
+        "MODO_CAMERAS",
+        "usb"
+    ).lower()
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " PROCURANDO CAMERAS DISPONIVEIS"
+    )
+    print(
+        "=========================================="
+    )
+
+    # ========================================================
+    # WIFI / IP TEM PRIORIDADE
+    # ========================================================
+
+    if modo == "wifi":
+
+        print(
+            "Modo configurado: WIFI / IP"
+        )
+
+        print(
+            "Tentando abrir somente as cameras "
+            "salvas em camera_wifi/cameras_wifi.json"
+        )
+
+        configuracoes_wifi = getattr(
+            config,
+            "CAMERAS",
+            {}
+        )
+
+        cameras = abrir_cameras_configuradas(
+            configuracoes_wifi,
+            "wifi"
+        )
+
+        if cameras:
+
+            print(
+                "=========================================="
+            )
+
+            print(
+                f"Total de cameras WiFi/IP abertas: "
+                f"{len(cameras)}"
+            )
+
+            print(
+                "=========================================="
+            )
+            print()
+
+            return cameras
+
+        # ----------------------------------------------------
+        # WIFI EXISTE NO JSON, MAS NENHUMA ABRIU
+        # ----------------------------------------------------
+
+        print()
+        print(
+            "⚠️ Nenhuma camera WiFi/IP configurada "
+            "conseguiu abrir."
+        )
+
+        resposta = input(
+            "Deseja usar cameras USB como fallback? "
+            "[S/n]: "
+        ).strip().lower()
+
+        if resposta not in (
+            "",
+            "s",
+            "sim",
+            "y",
+            "yes"
+        ):
+
+            print()
+            print(
+                "Fallback USB cancelado."
+            )
+            print()
+
+            return {}
+
+        print()
+        print(
+            "Usando fallback USB..."
+        )
+
+        if hasattr(
+            config,
+            "criar_cameras_usb"
+        ):
+
+            configuracoes_usb = (
+                config.criar_cameras_usb()
+            )
+
+        else:
+
+            configuracoes_usb = {
+
+                camera_id: {
+                    "nome":
+                        f"Camera {camera_id + 1:02d}",
+
+                    "fonte":
+                        camera_id,
+
+                    "tipo":
+                        "usb",
+
+                    "ativa":
+                        True,
+                }
+
+                for camera_id in range(
+                    MAX_INDICES_CAMERA
+                )
+            }
+
+        cameras = abrir_cameras_configuradas(
+            configuracoes_usb,
+            "usb"
+        )
+
+        print(
+            "=========================================="
+        )
+
+        print(
+            f"Total de cameras USB encontradas: "
+            f"{len(cameras)}"
+        )
+
+        print(
+            "=========================================="
+        )
+        print()
+
+        return cameras
+
+    # ========================================================
+    # USB PADRÃO
+    # ========================================================
+
+    print(
+        "Modo configurado: USB"
+    )
+
+    if hasattr(
+        config,
+        "criar_cameras_usb"
+    ):
+
+        configuracoes_usb = (
+            config.criar_cameras_usb()
+        )
+
+    else:
+
+        configuracoes_usb = getattr(
+            config,
+            "CAMERAS",
+            {}
+        )
+
+    cameras = abrir_cameras_configuradas(
+        configuracoes_usb,
+        "usb"
+    )
+
     print(
         "=========================================="
     )
 
     print(
-        f"Total de cameras encontradas: "
+        f"Total de cameras USB encontradas: "
         f"{len(cameras)}"
     )
 
@@ -649,8 +902,6 @@ def descobrir_cameras():
     print()
 
     return cameras
-
-
 # ============================================================
 # CAPTURA SINCRONIZADA
 # ============================================================
