@@ -554,26 +554,11 @@ def processar_regras_situacionais(
 
     infracoes_detectadas = []
 
-    mapa_ausencias = {
-
-        "Without Helmet":
-            "Capacete",
-
-        "Without Glass":
-            "Óculos",
-
-        "Without Mask":
-            "Máscara",
-
-        "Without Glove":
-            "Luvas",
-
-        "Without Ear Protectors":
-            "Protetor auricular",
-
-        "Without Safety Vest":
-            "Colete",
-    }
+    mapa_ausencias = getattr(
+        config,
+        "EPIS_AUSENCIA",
+        {}
+    )
 
     # ========================================================
     # DETECÇÕES

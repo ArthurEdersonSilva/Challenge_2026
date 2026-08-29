@@ -1,0 +1,144 @@
+{
+    "schema_version": 1,
+    "ambiente_id": "fd2112bb-7bf1-4efa-ba94-94e788c8fb4d",
+    "nome": "2teste",
+    "calibrado": true,
+    "cameras": [
+        {
+            "tipo": "rtsp",
+            "referencia": {
+                "config_index": 0
+            },
+            "nome": "2teste"
+        }
+    ],
+    "epis_obrigatorios": [
+        "Luvas"
+    ],
+    "objetos_globais": {
+        "OBJETO_001": {
+            "id": "OBJETO_001",
+            "numero": 1,
+            "nome": "Objeto 1",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    36,
+                    76,
+                    211,
+                    337
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_002": {
+            "id": "OBJETO_002",
+            "numero": 2,
+            "nome": "Objeto 2",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    398,
+                    236,
+                    878,
+                    589
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_003": {
+            "id": "OBJETO_003",
+            "numero": 3,
+            "nome": "Objeto 3",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    1,
+                    295,
+                    94,
+                    863
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_004": {
+            "id": "OBJETO_004",
+            "numero": 4,
+            "nome": "Objeto 4",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    164,
+                    537,
+                    438,
+                    680
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_005": {
+            "id": "OBJETO_005",
+            "numero": 5,
+            "nome": "Objeto 5",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    3,
+                    838,
+                    790,
+                    1276
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_006": {
+            "id": "OBJETO_006",
+            "numero": 6,
+            "nome": "Objeto 6",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    247,
+                    849,
+                    650,
+                    928
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_007": {
+            "id": "OBJETO_007",
+            "numero": 7,
+            "nome": "Objeto 7",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    743,
+                    849,
+                    960,
+                    1280
+                ]
+            },
+            "maquinario": true
+        }
+    },
+    "metadata": {
+        "criado_em": "2026-08-29T04:56:41.337239+00:00",
+        "atualizado_em": "2026-08-29T04:57:03.396213+00:00",
+        "origem": "novo"
+    }
+}

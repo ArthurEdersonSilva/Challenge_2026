@@ -1,21 +1,21 @@
 {
     "versao": 1,
-    "atualizado_em": "2026-08-27 02:02:32",
+    "atualizado_em": "2026-08-29 01:56:12",
     "modo": "wifi",
     "cameras": [
         {
-            "nome": "teste",
+            "nome": "2teste",
             "tipo": "rtsp",
-            "fonte": "rtsp://user:280534@192.168.0.2:1935/",
+            "fonte": "rtsp://192.168.0.2:8554/",
             "ip": "192.168.0.2",
             "ativa": true,
             "onvif": false,
             "portas_detectadas": [
-                1935
+                8554
             ],
             "resolucao": {
-                "largura": 2160,
-                "altura": 3840
+                "largura": 960,
+                "altura": 1280
             },
             "fps": null
         }

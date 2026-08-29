@@ -37,6 +37,19 @@ CONFIDENCIA_MINIMA = 0.5
 
 CONFIANCA_POSE = 0.5
 
+# ETAPA 5 - Pessoa + Pose.
+# Nenhum destes parâmetros altera automaticamente FPS, resolução
+# ou frequência de inferência. Pose é executado a cada frame de
+# monitoramento efetivamente recebido.
+CONFIANCA_KEYPOINT_POSE = 0.5
+POSE_DEBUG = False
+POSE_TRACK_IOU_MINIMO = 0.25
+POSE_TRACK_DISTANCIA_CENTRO_MAXIMA = 0.80
+POSE_TRACK_MAX_FRAMES_SEM_DETECCAO = 12
+
+# ETAPA 5: frame de rede acima deste limite não é observação atual.
+TEMPO_MAX_FRAME_REDE_SEGUNDOS = 2.0
+
 CONFIANCA_MAQUINARIO = 0.5
 
 TAMANHO_IMAGEM = 640
@@ -172,6 +185,24 @@ def carregar_cameras_wifi():
                     "ip"
                 ),
 
+            # ETAPA 4: conexão pertence à câmera lógica individual.
+            # Não existe porta RTSP global nem porta 554 presumida.
+            "porta":
+                item.get(
+                    "porta"
+                ),
+
+            "caminho_stream":
+                item.get(
+                    "caminho_stream",
+                    item.get("path")
+                ),
+
+            "camera_uid":
+                item.get(
+                    "camera_uid"
+                ),
+
             "ativa":
                 True,
 
@@ -298,7 +329,116 @@ EPIS_DISPONIVEIS = [
     "Protetor auricular",
 
     "Colete",
+
+    "Protetor facial",
+
+    "Macacão de proteção",
+
+    "Cinto de segurança",
+
+    "Bota de segurança",
 ]
+
+
+# ============================================================
+# CONTRATO DE CLASSES DO MODELO DE EPI
+#
+# Estes nomes correspondem exatamente às classes do best.pt.
+# EPIS_DISPONIVEIS define apenas o catálogo selecionável.
+# EPIS_OBRIGATORIOS continua sendo definido manualmente.
+# ============================================================
+
+CLASSES_MODELO_EPI = [
+
+    "Ear Protectors",
+    "Face Shield",
+    "Full body suit",
+    "Glasses",
+    "Gloves",
+    "Helmet",
+    "Mask",
+    "Safety Harness",
+    "Safety Shoes",
+    "Safety Vest",
+    "Without Ear Protectors",
+    "Without Face Shield",
+    "Without Full body suit",
+    "Without Glass",
+    "Without Glove",
+    "Without Helmet",
+    "Without Mask",
+    "Without Safety Harness",
+    "Without Safety Shoes",
+    "Without Safety Vest",
+]
+
+
+EPIS_PRESENCA = {
+
+    "Ear Protectors":
+        "Protetor auricular",
+
+    "Face Shield":
+        "Protetor facial",
+
+    "Full body suit":
+        "Macacão de proteção",
+
+    "Glasses":
+        "Óculos",
+
+    "Gloves":
+        "Luvas",
+
+    "Helmet":
+        "Capacete",
+
+    "Mask":
+        "Máscara",
+
+    "Safety Harness":
+        "Cinto de segurança",
+
+    "Safety Shoes":
+        "Bota de segurança",
+
+    "Safety Vest":
+        "Colete",
+}
+
+
+EPIS_AUSENCIA = {
+
+    "Without Ear Protectors":
+        "Protetor auricular",
+
+    "Without Face Shield":
+        "Protetor facial",
+
+    "Without Full body suit":
+        "Macacão de proteção",
+
+    "Without Glass":
+        "Óculos",
+
+    "Without Glove":
+        "Luvas",
+
+    "Without Helmet":
+        "Capacete",
+
+    "Without Mask":
+        "Máscara",
+
+    "Without Safety Harness":
+        "Cinto de segurança",
+
+    "Without Safety Shoes":
+        "Bota de segurança",
+
+    "Without Safety Vest":
+        "Colete",
+}
 
 
 # ============================================================
@@ -314,6 +454,20 @@ EPIS_DISPONIVEIS = [
 EPIS_OBRIGATORIOS = []
 
 EPIS_CONFIGURADOS = False
+
+
+# ============================================================
+# ASSOCIAÇÃO EPI ↔ PESSOA - ETAPA 6
+#
+# Apenas parâmetros geométricos. Não representam estados
+# CORRETO / INCORRETO / AUSENTE / INDETERMINADO.
+# ============================================================
+
+ASSOCIACAO_EPI_SCORE_MINIMO = 0.45
+ASSOCIACAO_EPI_MARGEM_AMBIGUIDADE = 0.08
+ASSOCIACAO_EPI_INTERSECAO_MINIMA = 0.05
+ASSOCIACAO_EPI_EXPANSAO_BBOX_PESSOA = 0.08
+ASSOCIACAO_EPI_DEBUG = False
 
 
 # ============================================================
@@ -840,6 +994,64 @@ def carregar_configuracoes():
 
 
 # ============================================================
+# ATIVAÇÃO DE PERFIL EM RUNTIME - ETAPA 3
+#
+# O perfil JSON em ambientes/ é a fonte persistente.
+# Estas variáveis continuam existindo somente como espelho
+# de compatibilidade para o código legado do runtime.
+# ============================================================
+
+def aplicar_perfil_runtime(perfil):
+
+    global NOME_AMBIENTE
+    global AMBIENTE_CALIBRADO
+    global OBJETOS_GLOBAIS
+    global EPIS_CONFIGURADOS
+    global EPIS_OBRIGATORIOS
+
+    if not isinstance(perfil, dict):
+        raise ValueError("Perfil de ambiente inválido.")
+
+    NOME_AMBIENTE = str(
+        perfil.get("nome", "Ambiente Principal")
+    )
+
+    AMBIENTE_CALIBRADO = bool(
+        perfil.get("calibrado", False)
+    )
+
+    OBJETOS_GLOBAIS = dict(
+        perfil.get("objetos_globais", {}) or {}
+    )
+
+    EPIS_OBRIGATORIOS = list(
+        perfil.get("epis_obrigatorios", []) or []
+    )
+
+    # Em um perfil persistido, uma lista vazia também pode ser
+    # uma escolha manual válida. Se o ambiente está calibrado,
+    # a etapa de configuração de EPI é considerada concluída.
+    EPIS_CONFIGURADOS = bool(
+        AMBIENTE_CALIBRADO
+    )
+
+
+def limpar_perfil_runtime():
+
+    global NOME_AMBIENTE
+    global AMBIENTE_CALIBRADO
+    global OBJETOS_GLOBAIS
+    global EPIS_CONFIGURADOS
+    global EPIS_OBRIGATORIOS
+
+    NOME_AMBIENTE = "Ambiente Principal"
+    AMBIENTE_CALIBRADO = False
+    OBJETOS_GLOBAIS = {}
+    EPIS_CONFIGURADOS = False
+    EPIS_OBRIGATORIOS = []
+
+
+# ============================================================
 # ESTADO INICIAL
 # ============================================================
 
@@ -917,9 +1129,13 @@ def mostrar_configuracao():
 
 # ============================================================
 # INICIALIZAÇÃO
+#
+# ETAPA 3: o legado NÃO é mais ativado automaticamente no
+# import. Ele permanece disponível exclusivamente para migração
+# explícita pelo fluxo de startup do main.py.
 # ============================================================
 
-carregar_configuracoes()
+limpar_perfil_runtime()
 
 
 if __name__ == "__main__":
@@ -949,8 +1165,7 @@ SMTP_USAR_TLS = True
 SMTP_USUARIO = "arthur.ederson.ae@gmail.com"
 
 # Senha de app do Gmail - NÃO é a senha normal
-SMTP_SENHA = "wxhq kctv qoxr gyyw"
-
+SMTP_SENHA = os.getenv("VISION_SAFETY_SMTP_SENHA", "")
 # Remetente
 SMTP_REMETENTE = SMTP_USUARIO
 
