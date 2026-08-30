@@ -147,3 +147,33 @@ def enviar_email_incidente(
         return True, "ENVIADO"
     except Exception as erro:
         return False, f"SMTP:{erro}"
+
+
+# Compatibilidade: funções legadas permanecem disponíveis, mas não mantêm
+# alertas_ativos e não são usadas pelo pipeline das ETAPAS 10/11.
+def mensagem_educativa(tipo_infracao):
+    return mensagem_incidente(str(tipo_infracao), "AUSENCIA_EPI")
+
+
+def criar_chave_notificacao(camera_id, matricula, tipo_infracao):
+    return f"LEGADO|{camera_id}|{matricula or 'DESCONHECIDO'}|{tipo_infracao}"
+
+
+def atualizar_notificacoes(*args, **kwargs):
+    return []
+
+
+def obter_alertas_ativos():
+    return []
+
+
+def obter_alerta_principal():
+    return None
+
+
+def limpar_notificacoes():
+    return None
+
+
+def encerrar_notificacoes():
+    return None

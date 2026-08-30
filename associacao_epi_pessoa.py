@@ -29,11 +29,23 @@ class CandidaturaAssociacao:
     camera_id: int
     track_id: int
     track_instance_id: str
+    # Score usado exclusivamente para resolver DE QUEM é a detecção.
+    # Para presença física equivale ao score_ownership. Para classes
+    # Without representa o score de localização da evidência negativa.
     score: float
+    score_ownership: Optional[float]
     componente_bbox: float
-    componente_regiao: float
-    componente_distancia: float
-    metodo: str
+    componente_proximidade_corpo: float
+    componente_proximidade_keypoints: float
+    componente_regiao_esperada: float
+    distancia_corporal_normalizada: Optional[float]
+    distancia_regiao_esperada_normalizada: Optional[float]
+    regiao_corporal_mais_proxima: Optional[str]
+    regiao_esperada: str
+    compatibilidade_regiao_esperada: float
+    metodo_ownership: str
+    metodo_regiao_esperada: str
+    qualidade_geometrica: str
 
 
 @dataclass(frozen=True)
@@ -50,7 +62,21 @@ class ResultadoAssociacao:
     track_instance_id: Optional[str] = None
     score_assoc: Optional[float] = None
     score_segundo_candidato: Optional[float] = None
+    # Campos geométricos preservados para a ETAPA 7. Nenhum deles
+    # representa CORRETO/INCORRETO/AUSENTE/INDETERMINADO.
+    score_ownership: Optional[float] = None
+    componente_bbox: Optional[float] = None
+    componente_proximidade_corpo: Optional[float] = None
+    componente_proximidade_keypoints: Optional[float] = None
+    componente_regiao_esperada: Optional[float] = None
+    distancia_corporal_normalizada: Optional[float] = None
+    distancia_regiao_esperada_normalizada: Optional[float] = None
+    regiao_corporal_mais_proxima: Optional[str] = None
+    regiao_esperada: Optional[str] = None
+    compatibilidade_regiao_esperada: Optional[float] = None
     metodo: Optional[str] = None
+    metodo_regiao_esperada: Optional[str] = None
+    qualidade_geometrica: Optional[str] = None
     candidatos: Tuple[Tuple[str, float], ...] = field(default_factory=tuple)
 
 
@@ -65,6 +91,27 @@ REGIAO_PRIMARIA_POR_EPI = {
     "Cinto de segurança": "quadril_tronco",
     "Luvas": "maos",
     "Bota de segurança": "pes",
+}
+
+
+KEYPOINT_PARA_REGIAO_CORPORAL = {
+    "nariz": "cabeca_face",
+    "olho_esquerdo": "cabeca_face",
+    "olho_direito": "cabeca_face",
+    "orelha_esquerda": "cabeca_face",
+    "orelha_direita": "cabeca_face",
+    "ombro_esquerdo": "tronco",
+    "ombro_direito": "tronco",
+    "cotovelo_esquerdo": "braco_esquerdo",
+    "cotovelo_direito": "braco_direito",
+    "punho_esquerdo": "mao_esquerda",
+    "punho_direito": "mao_direita",
+    "quadril_esquerdo": "quadril",
+    "quadril_direito": "quadril",
+    "joelho_esquerdo": "perna_esquerda",
+    "joelho_direito": "perna_direita",
+    "tornozelo_esquerdo": "pe_esquerdo",
+    "tornozelo_direito": "pe_direito",
 }
 
 
@@ -116,6 +163,50 @@ def _distancia_normalizada(ponto_a, ponto_b, bbox_pessoa) -> float:
     )
     altura = max(1.0, float(bbox_pessoa[3]) - float(bbox_pessoa[1]))
     return distancia / altura
+
+
+def _distancia_ponto_bbox_normalizada(ponto, bbox, bbox_pessoa) -> float:
+    x, y = float(ponto[0]), float(ponto[1])
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    dx = max(x1 - x, 0.0, x - x2)
+    dy = max(y1 - y, 0.0, y - y2)
+    distancia = math.hypot(dx, dy)
+    altura = max(1.0, float(bbox_pessoa[3]) - float(bbox_pessoa[1]))
+    return distancia / altura
+
+
+def _keypoints_corporais_confiaveis(pessoa: dict):
+    pontos = []
+    for nome, kp in sorted((pessoa.get("keypoints") or {}).items()):
+        if not kp or not bool(kp.get("confiavel", False)):
+            continue
+        x = kp.get("x")
+        y = kp.get("y")
+        if x is None or y is None:
+            continue
+        pontos.append((str(nome), (float(x), float(y))))
+    return pontos
+
+
+def _proximidade_keypoints_corpo(centro_epi, pessoa: dict, bbox_pessoa):
+    pontos = _keypoints_corporais_confiaveis(pessoa)
+    if not pontos:
+        return 0.0, None, None
+
+    melhor_nome = None
+    melhor_distancia = None
+    for nome, ponto in pontos:
+        distancia = _distancia_normalizada(centro_epi, ponto, bbox_pessoa)
+        if melhor_distancia is None or distancia < melhor_distancia:
+            melhor_distancia = distancia
+            melhor_nome = nome
+
+    # 0.45 da altura da pessoa é uma tolerância de ownership, não uma
+    # regra de uso correto. O objetivo é reconhecer EPI carregado junto
+    # ao corpo sem exigir a região anatômica de utilização.
+    componente = max(0.0, 1.0 - min(1.0, float(melhor_distancia) / 0.45))
+    regiao = KEYPOINT_PARA_REGIAO_CORPORAL.get(melhor_nome, melhor_nome)
+    return float(componente), regiao, float(melhor_distancia)
 
 
 def _kp_valido(pessoa, nome):
@@ -353,46 +444,85 @@ def _score_candidatura(
         return None
     bbox_pessoa = tuple(float(v) for v in bbox_pessoa)
     bbox_expandida = _expandir_bbox(bbox_pessoa, expansao_bbox)
+    centro_epi = deteccao.centro
 
+    # Geometria geral de ownership: independente da região esperada de uso.
+    componente_bbox = _intersecao_sobre_area_epi(deteccao.bbox, bbox_expandida)
+    distancia_corpo = _distancia_ponto_bbox_normalizada(
+        centro_epi, bbox_expandida, bbox_pessoa
+    )
+    componente_proximidade_corpo = max(
+        0.0, 1.0 - min(1.0, distancia_corpo / 0.30)
+    )
+    centro_na_bbox_expandida = 1.0 if _ponto_em_bbox(centro_epi, bbox_expandida) else 0.0
+    (
+        componente_proximidade_keypoints,
+        regiao_corporal_mais_proxima,
+        distancia_keypoint,
+    ) = _proximidade_keypoints_corpo(centro_epi, pessoa, bbox_pessoa)
+
+    if distancia_keypoint is None:
+        metodo_ownership = "BBOX_FALLBACK"
+        qualidade_geometrica = "FALLBACK"
+        score_ownership = (
+            0.70 * componente_bbox
+            + 0.20 * componente_proximidade_corpo
+            + 0.10 * centro_na_bbox_expandida
+        )
+        distancia_corporal_normalizada = float(distancia_corpo)
+    else:
+        metodo_ownership = "KEYPOINTS_E_BBOX"
+        qualidade_geometrica = "FORTE"
+        score_ownership = (
+            0.45 * componente_bbox
+            + 0.20 * componente_proximidade_corpo
+            + 0.25 * componente_proximidade_keypoints
+            + 0.10 * centro_na_bbox_expandida
+        )
+        distancia_corporal_normalizada = min(
+            float(distancia_corpo), float(distancia_keypoint)
+        )
+
+    # Compatibilidade anatômica esperada é calculada e preservada para a
+    # ETAPA 7, mas NÃO bloqueia nem domina o ownership de detecção positiva.
     regiao = derivar_regiao_anatomica(pessoa, deteccao.epi)
     regiao_bbox = regiao["bbox"]
-
-    componente_bbox = _intersecao_sobre_area_epi(deteccao.bbox, bbox_expandida)
-    componente_regiao = _intersecao_sobre_area_epi(deteccao.bbox, regiao_bbox)
-
-    centro_epi = deteccao.centro
-    pontos = list(regiao["pontos_referencia"])
-    if pontos:
-        distancia = min(
+    componente_regiao_esperada = _intersecao_sobre_area_epi(
+        deteccao.bbox, regiao_bbox
+    )
+    centro_na_regiao = 1.0 if _ponto_em_bbox(centro_epi, regiao_bbox) else 0.0
+    pontos_regiao = list(regiao["pontos_referencia"])
+    if pontos_regiao:
+        distancia_regiao = min(
             _distancia_normalizada(centro_epi, ponto, bbox_pessoa)
-            for ponto in pontos
+            for ponto in pontos_regiao
         )
     else:
-        distancia = _distancia_normalizada(
-            centro_epi,
-            _centro_bbox(regiao_bbox),
-            bbox_pessoa,
+        distancia_regiao = _distancia_normalizada(
+            centro_epi, _centro_bbox(regiao_bbox), bbox_pessoa
         )
-    componente_distancia = max(0.0, 1.0 - min(1.0, distancia / 0.65))
-
-    centro_na_regiao = 1.0 if _ponto_em_bbox(centro_epi, regiao_bbox) else 0.0
+    componente_distancia_regiao = max(
+        0.0, 1.0 - min(1.0, float(distancia_regiao) / 0.65)
+    )
+    compatibilidade_regiao_esperada = (
+        0.65 * max(componente_regiao_esperada, centro_na_regiao)
+        + 0.35 * componente_distancia_regiao
+    )
 
     if deteccao.tipo_deteccao == TIPO_EVIDENCIA_NEGATIVA:
-        # "Without ..." é evidência localizada de ausência do modelo,
-        # não bbox física de um EPI. Priorizamos compatibilidade com a
-        # região anatômica e proximidade, usando bbox da pessoa só como
-        # filtro espacial secundário.
+        # Without... é evidência negativa localizada, não objeto físico.
+        # Aqui a região anatômica correspondente continua central.
         score = (
-            0.55 * max(componente_regiao, centro_na_regiao)
-            + 0.35 * componente_distancia
+            0.55 * max(componente_regiao_esperada, centro_na_regiao)
+            + 0.35 * componente_distancia_regiao
             + 0.10 * componente_bbox
         )
+        score_ownership_saida = None
+        metodo_associacao = str(regiao["metodo"])
     else:
-        score = (
-            0.35 * componente_bbox
-            + 0.40 * max(componente_regiao, centro_na_regiao)
-            + 0.25 * componente_distancia
-        )
+        score = float(score_ownership)
+        score_ownership_saida = float(score_ownership)
+        metodo_associacao = metodo_ownership
 
     return CandidaturaAssociacao(
         detection_id=deteccao.detection_id,
@@ -400,12 +530,40 @@ def _score_candidatura(
         track_id=int(pessoa["track_id"]),
         track_instance_id=str(pessoa["track_instance_id"]),
         score=float(score),
+        score_ownership=score_ownership_saida,
         componente_bbox=float(componente_bbox),
-        componente_regiao=float(componente_regiao),
-        componente_distancia=float(componente_distancia),
-        metodo=str(regiao["metodo"]),
+        componente_proximidade_corpo=float(componente_proximidade_corpo),
+        componente_proximidade_keypoints=float(componente_proximidade_keypoints),
+        componente_regiao_esperada=float(componente_regiao_esperada),
+        distancia_corporal_normalizada=distancia_corporal_normalizada,
+        distancia_regiao_esperada_normalizada=float(distancia_regiao),
+        regiao_corporal_mais_proxima=regiao_corporal_mais_proxima,
+        regiao_esperada=str(regiao["nome"]),
+        compatibilidade_regiao_esperada=float(compatibilidade_regiao_esperada),
+        metodo_ownership=metodo_associacao,
+        metodo_regiao_esperada=str(regiao["metodo"]),
+        qualidade_geometrica=qualidade_geometrica,
     )
 
+
+def _campos_geometricos(candidatura: Optional[CandidaturaAssociacao]):
+    if candidatura is None:
+        return {}
+    return {
+        "score_ownership": candidatura.score_ownership,
+        "componente_bbox": candidatura.componente_bbox,
+        "componente_proximidade_corpo": candidatura.componente_proximidade_corpo,
+        "componente_proximidade_keypoints": candidatura.componente_proximidade_keypoints,
+        "componente_regiao_esperada": candidatura.componente_regiao_esperada,
+        "distancia_corporal_normalizada": candidatura.distancia_corporal_normalizada,
+        "distancia_regiao_esperada_normalizada": candidatura.distancia_regiao_esperada_normalizada,
+        "regiao_corporal_mais_proxima": candidatura.regiao_corporal_mais_proxima,
+        "regiao_esperada": candidatura.regiao_esperada,
+        "compatibilidade_regiao_esperada": candidatura.compatibilidade_regiao_esperada,
+        "metodo": candidatura.metodo_ownership,
+        "metodo_regiao_esperada": candidatura.metodo_regiao_esperada,
+        "qualidade_geometrica": candidatura.qualidade_geometrica,
+    }
 
 def associar_deteccoes_camera(
     camera_id: int,
@@ -451,14 +609,17 @@ def associar_deteccoes_camera(
             if candidatura is None:
                 continue
 
-            # Para presença física exigimos pelo menos algum vínculo com
-            # bbox/região. Para evidência negativa, região/distância podem
-            # sustentar a candidatura mesmo com pouca interseção física.
+            # Para presença física exigimos vínculo corporal geral, nunca
+            # compatibilidade com a região de uso esperada. Isso permite
+            # capacete na mão, colete carregado etc. seguirem ASSOCIADOS
+            # ao proprietário para posterior avaliação semântica na ETAPA 7.
             if deteccao.tipo_deteccao == TIPO_PRESENCA:
-                if (
-                    candidatura.componente_bbox < intersecao_minima
-                    and candidatura.componente_regiao < intersecao_minima
-                ):
+                vinculo_bbox = candidatura.componente_bbox >= intersecao_minima
+                vinculo_corporal_proximo = (
+                    candidatura.componente_proximidade_corpo >= 0.85
+                    and candidatura.componente_proximidade_keypoints >= 0.55
+                )
+                if not (vinculo_bbox or vinculo_corporal_proximo):
                     continue
             candidaturas_por_deteccao[deteccao.detection_id].append(candidatura)
 
@@ -489,6 +650,7 @@ def associar_deteccoes_camera(
                         candidaturas[1].score if len(candidaturas) > 1 else None
                     ),
                     candidatos=candidatos_resumo,
+                    **_campos_geometricos(candidaturas[0] if candidaturas else None),
                 )
             )
             continue
@@ -513,6 +675,7 @@ def associar_deteccoes_camera(
                     score_assoc=melhor.score,
                     score_segundo_candidato=segundo.score,
                     candidatos=candidatos_resumo,
+                    **_campos_geometricos(melhor),
                 )
             )
             continue
@@ -531,8 +694,8 @@ def associar_deteccoes_camera(
                 track_instance_id=melhor.track_instance_id,
                 score_assoc=melhor.score,
                 score_segundo_candidato=(segundo.score if segundo else None),
-                metodo=melhor.metodo,
                 candidatos=candidatos_resumo,
+                **_campos_geometricos(melhor),
             )
         )
 

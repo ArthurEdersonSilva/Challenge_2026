@@ -1,0 +1,37 @@
+{
+    "schema_version": 1,
+    "cameras": [
+        {
+            "camera_uid": "edece480-72da-4d0d-a270-b5903ab0fa4b",
+            "nome": "Teste 1",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://192.168.0.2:8554/",
+                "host": "192.168.0.2",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": {
+                    "largura": 960,
+                    "altura": 1280
+                },
+                "fps": null
+            },
+            "compatibilidade": {
+                "config_index_legado": 0
+            },
+            "metadata": {
+                "criado_em": "2026-08-30T02:58:21.741638+00:00",
+                "atualizado_em": "2026-08-30T02:58:21.741638+00:00"
+            }
+        }
+    ],
+    "metadata": {
+        "criado_em": "2026-08-30T02:58:21.741638+00:00",
+        "atualizado_em": "2026-08-30T02:58:21.741638+00:00"
+    }
+}

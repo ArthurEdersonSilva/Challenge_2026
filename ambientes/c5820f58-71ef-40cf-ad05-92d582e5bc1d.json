@@ -1,19 +1,20 @@
 {
-    "schema_version": 1,
-    "ambiente_id": "fd2112bb-7bf1-4efa-ba94-94e788c8fb4d",
-    "nome": "2teste",
+    "schema_version": 2,
+    "ambiente_id": "c5820f58-71ef-40cf-ad05-92d582e5bc1d",
+    "nome": "Teste",
     "calibrado": true,
     "cameras": [
         {
+            "camera_uid": "edece480-72da-4d0d-a270-b5903ab0fa4b",
             "tipo": "rtsp",
-            "referencia": {
+            "nome": "Teste 1",
+            "referencia_legada": {
                 "config_index": 0
-            },
-            "nome": "2teste"
+            }
         }
     ],
     "epis_obrigatorios": [
-        "Luvas"
+        "Capacete"
     ],
     "objetos_globais": {
         "OBJETO_001": {
@@ -25,10 +26,10 @@
             ],
             "deteccoes": {
                 "0": [
-                    36,
-                    76,
-                    211,
-                    337
+                    1,
+                    2,
+                    48,
+                    323
                 ]
             },
             "maquinario": false
@@ -42,10 +43,10 @@
             ],
             "deteccoes": {
                 "0": [
-                    398,
-                    236,
-                    878,
-                    589
+                    123,
+                    10,
+                    894,
+                    622
                 ]
             },
             "maquinario": false
@@ -59,13 +60,13 @@
             ],
             "deteccoes": {
                 "0": [
-                    1,
-                    295,
-                    94,
-                    863
+                    233,
+                    309,
+                    501,
+                    659
                 ]
             },
-            "maquinario": false
+            "maquinario": true
         },
         "OBJETO_004": {
             "id": "OBJETO_004",
@@ -76,10 +77,10 @@
             ],
             "deteccoes": {
                 "0": [
-                    164,
-                    537,
-                    438,
-                    680
+                    332,
+                    548,
+                    605,
+                    673
                 ]
             },
             "maquinario": false
@@ -93,10 +94,10 @@
             ],
             "deteccoes": {
                 "0": [
-                    3,
-                    838,
-                    790,
-                    1276
+                    499,
+                    580,
+                    693,
+                    804
                 ]
             },
             "maquinario": false
@@ -110,10 +111,10 @@
             ],
             "deteccoes": {
                 "0": [
-                    247,
-                    849,
-                    650,
-                    928
+                    306,
+                    665,
+                    526,
+                    738
                 ]
             },
             "maquinario": false
@@ -127,18 +128,52 @@
             ],
             "deteccoes": {
                 "0": [
-                    743,
-                    849,
+                    556,
+                    815,
                     960,
+                    1274
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_008": {
+            "id": "OBJETO_008",
+            "numero": 8,
+            "nome": "Objeto 8",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    193,
+                    915,
+                    560,
+                    1279
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_009": {
+            "id": "OBJETO_009",
+            "numero": 9,
+            "nome": "Objeto 9",
+            "cameras": [
+                0
+            ],
+            "deteccoes": {
+                "0": [
+                    3,
+                    1193,
+                    226,
                     1280
                 ]
             },
-            "maquinario": true
+            "maquinario": false
         }
     },
     "metadata": {
-        "criado_em": "2026-08-29T04:56:41.337239+00:00",
-        "atualizado_em": "2026-08-29T04:57:03.396213+00:00",
+        "criado_em": "2026-08-30T02:58:30.466618+00:00",
+        "atualizado_em": "2026-08-30T02:58:57.368271+00:00",
         "origem": "novo"
     }
 }

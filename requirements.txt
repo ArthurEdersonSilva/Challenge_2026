@@ -8,3 +8,5 @@ face-recognition
 cmake
 deepface
 tf-keras
+PyYAML
+Pillow

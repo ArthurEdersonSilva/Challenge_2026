@@ -469,6 +469,32 @@ ASSOCIACAO_EPI_INTERSECAO_MINIMA = 0.05
 ASSOCIACAO_EPI_EXPANSAO_BBOX_PESSOA = 0.08
 ASSOCIACAO_EPI_DEBUG = False
 
+# ETAPA 7 - decisão semântica instantânea. Estes thresholds não possuem
+# memória temporal e não alteram a inferência, Pose ou associação.
+AVALIACAO_EPI_COMPATIBILIDADE_CORRETO_MIN = 0.60
+AVALIACAO_EPI_COMPATIBILIDADE_INCORRETO_MAX = 0.30
+AVALIACAO_EPI_NEGATIVA_UTILIZAVEL_MIN = 0.55
+
+
+# ============================================================
+# ESTABILIZAÇÃO TEMPORAL INDIVIDUAL - ETAPA 8
+#
+# Todos os intervalos são em segundos e são avaliados com relógio
+# monotônico. Não dependem de FPS fixo nem alteram a ETAPA 7.
+# ============================================================
+
+ESTABILIZACAO_EPI_TEMPO_CORRETO_SEGUNDOS = 1.0
+ESTABILIZACAO_EPI_TEMPO_INCORRETO_SEGUNDOS = 1.5
+ESTABILIZACAO_EPI_TEMPO_AUSENTE_SEGUNDOS = 2.0
+
+# Uma oclusão curta preserva o estado confirmado. Persistência de
+# INDETERMINADO acima da expiração remove a confirmação.
+ESTABILIZACAO_EPI_TOLERANCIA_INDETERMINADO_SEGUNDOS = 0.75
+ESTABILIZACAO_EPI_EXPIRACAO_INDETERMINADO_SEGUNDOS = 3.0
+
+# Perda de observação da câmera/track não mantém confirmação para sempre.
+ESTABILIZACAO_EPI_EXPIRACAO_SEM_OBSERVACAO_SEGUNDOS = 3.0
+
 
 # ============================================================
 # CALIBRAÇÃO DO AMBIENTE
@@ -738,16 +764,22 @@ PATH_LOGS_CSV = (
     "historico_incidentes.csv"
 )
 
+# ETAPA 10: log individual versionado. O legado acima permanece apenas
+# por compatibilidade de leitura/arquivos antigos e não é a fonte operacional.
+PATH_INCIDENTES_EPI_CSV = (
+    "incidentes_epi.csv"
+)
 
 PASTA_PROVAS_INCIDENTES = (
     "provas_incidentes"
 )
 
+INCIDENTE_INTERVALO_EVIDENCIA_PERSISTENCIA_SEGUNDOS = 300
+INCIDENTE_SALVAR_FRAME_COMPLETO = True
+INCIDENTE_SALVAR_CROP_PESSOA = True
+INCIDENTE_QUALIDADE_JPEG = 90
 
-# ------------------------------------------------------------
-# 5 MINUTOS ENTRE FOTOS DO MESMO INCIDENTE
-# ------------------------------------------------------------
-
+# Compatibilidade legado: não governa a ETAPA 10 individual.
 INTERVALO_REPETICAO_INCIDENTE_SEGUNDOS = 300
 
 
@@ -792,6 +824,22 @@ PATH_DADOS_OPERADORES = os.path.join(
 MODELO_FACE = "Facenet"
 
 INTERVALO_BIOMETRIA_SEGUNDOS = 3.0
+BIOMETRIA_REVALIDACAO_IDENTIFICADO_SEGUNDOS = 20.0
+BIOMETRIA_CONFIRMACOES_IDENTIDADE = 2
+BIOMETRIA_CONFIRMACOES_DESCONHECIDO = 2
+BIOMETRIA_CONFLITOS_PARA_INVALIDAR = 2
+BIOMETRIA_DISTANCIA_MAXIMA = 0.40
+BIOMETRIA_MARGEM_MINIMA_TOP1_TOP2 = 0.05
+BIOMETRIA_FILA_MAXIMA = 4
+BIOMETRIA_DETECTOR_BACKEND = "opencv"
+BIOMETRIA_CONFIANCA_ROSTO_MINIMA = 0.80
+BIOMETRIA_DIMENSAO_ROSTO_MINIMA = 48
+BIOMETRIA_CROP_LARGURA_MINIMA = 64
+BIOMETRIA_CROP_ALTURA_MINIMA = 64
+BIOMETRIA_CROP_BLUR_VARIANCIA_MINIMA = 25.0
+BIOMETRIA_CROP_BRILHO_MINIMO = 25.0
+BIOMETRIA_CROP_BRILHO_MAXIMO = 235.0
+BIOMETRIA_CROP_PADDING_PROPORCIONAL = 0.65
 
 
 # ============================================================
@@ -1143,14 +1191,31 @@ if __name__ == "__main__":
     mostrar_configuracao()
 
 # ============================================================
-# NOTIFICACOES
+# NOTIFICACOES - ETAPA 11
 # ============================================================
 
+ATIVAR_ALERTA_VISUAL = True
 ATIVAR_ALERTA_AUDIO = True
 ATIVAR_ALERTA_EMAIL = True
 
-INTERVALO_AUDIO_SEGUNDOS = 7
-TEMPO_EMAIL_SEGUNDOS = 15
+# Default único aprovado nesta etapa. Não há classificação específica
+# por EPI sem regra de negócio formal.
+NOTIFICACAO_SEVERIDADE_PADRAO = "ALTA"
+
+NOTIFICACAO_AUDIO_INTERVALO_SEGUNDOS = 7.0
+NOTIFICACAO_AUDIO_FILA_MAXIMA = 8
+NOTIFICACAO_AUDIO_RETRY_FILA_SEGUNDOS = 1.0
+
+NOTIFICACAO_EMAIL_ATRASO_SEGUNDOS = 15.0
+NOTIFICACAO_EMAIL_FILA_MAXIMA = 8
+NOTIFICACAO_EMAIL_MAX_TENTATIVAS = 3
+NOTIFICACAO_EMAIL_RETRY_SEGUNDOS = 30.0
+NOTIFICACAO_EMAIL_RETRY_FILA_SEGUNDOS = 1.0
+NOTIFICACAO_EMAIL_REPETICAO_SEGUNDOS = None
+
+# Aliases legados mantidos somente por compatibilidade.
+INTERVALO_AUDIO_SEGUNDOS = NOTIFICACAO_AUDIO_INTERVALO_SEGUNDOS
+TEMPO_EMAIL_SEGUNDOS = NOTIFICACAO_EMAIL_ATRASO_SEGUNDOS
 
 
 # ============================================================

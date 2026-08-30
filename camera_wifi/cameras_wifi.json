@@ -1,10 +1,10 @@
 {
     "versao": 1,
-    "atualizado_em": "2026-08-29 01:56:12",
+    "atualizado_em": "2026-08-29 23:57:16",
     "modo": "wifi",
     "cameras": [
         {
-            "nome": "2teste",
+            "nome": "Teste 1",
             "tipo": "rtsp",
             "fonte": "rtsp://192.168.0.2:8554/",
             "ip": "192.168.0.2",

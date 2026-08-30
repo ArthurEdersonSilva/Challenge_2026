@@ -22,17 +22,6 @@ from objetos_globais import (
     preparar_objetos_para_salvar
 )
 
-from decision_engine import (
-    processar_incidente,
-    atualizar_incidentes_ausentes,
-    criar_chave_incidente
-)
-
-from notificacoes import (
-    atualizar_notificacoes,
-    encerrar_notificacoes
-)
-
 from estado_sistema import (
     CAMERA_OFFLINE,
     CAMERA_ONLINE,
@@ -45,9 +34,39 @@ from rastreamento_pessoas import (
     desenhar_pose_debug,
 )
 
+from avaliacao_ergonomia import (
+    atualizar_ergonomia_camera,
+    limpar_ergonomia_camera,
+    obter_estado_ergonomia,
+)
+
 from associacao_epi_pessoa import (
     associar_deteccoes_camera,
 )
+
+from avaliacao_estado_epi import (
+    avaliar_estados_camera,
+)
+
+from estabilizacao_temporal_epi import (
+    ESTADO_AUSENTE as TEMPORAL_AUSENTE,
+    ESTADO_CORRETO as TEMPORAL_CORRETO,
+    ESTADO_INCORRETO as TEMPORAL_INCORRETO,
+    estabilizar_estados_camera,
+    expirar_estado_sem_observacao,
+)
+
+from biometria_operador import (
+    EVENTO_JOB_INICIADO,
+    EVENTO_RESULTADO,
+    GerenciadorBiometriaAssincrona,
+    extrair_crop_facial_pessoa,
+)
+
+from reconhecimento_facial import ReconhecedorFacial
+
+from gestao_incidentes_epi import GestorIncidentesEPI
+from gestao_notificacoes_incidentes import GestorNotificacoesIncidentes
 
 
 # ============================================================
@@ -129,6 +148,10 @@ rolagem_mouse = 0
 modelo_epi = None
 modelo_pose = None
 gerenciador_rastreamento_pessoas = None
+gerenciador_biometria = None
+sequencia_observacao_biometria = {}
+gestor_incidentes_epi = None
+gestor_notificacoes_incidentes = None
 
 
 def carregar_modelo_epi():
@@ -364,12 +387,17 @@ def processar_pose_cameras(frames):
                 camera.camera_id,
                 resultado.tracks,
             )
+            atualizar_ergonomia_camera(
+                camera.camera_id,
+                resultado.tracks,
+            )
         except Exception as erro:
             print(f"⚠️ Erro Pose {camera.nome}: {erro}")
             tracks = gerenciador.marcar_camera_sem_frame(camera.camera_id)
             estado_sistema.atualizar_pessoas_camera(
                 camera.camera_id,
                 tracks,
+                preservar_estados_temporais_ausentes=True,
             )
 
     if latencias:
@@ -406,6 +434,9 @@ def encerrar_tracking_camera(camera_id):
         gerenciador_rastreamento_pessoas.encerrar_camera(camera_id)
 
     estado_sistema.encerrar_pessoas_camera(camera_id)
+    limpar_ergonomia_camera(camera_id)
+    estado_sistema.limpar_associacoes_epi_camera(camera_id)
+    estado_sistema.limpar_estados_epi_individuais_camera(camera_id)
 
 
 def marcar_tracking_camera_sem_frame(camera_id):
@@ -419,8 +450,248 @@ def marcar_tracking_camera_sem_frame(camera_id):
         return
 
     tracks = gerenciador_rastreamento_pessoas.marcar_camera_sem_frame(camera_id)
-    estado_sistema.atualizar_pessoas_camera(camera_id, tracks)
+    estado_sistema.atualizar_pessoas_camera(
+        camera_id,
+        tracks,
+        preservar_estados_temporais_ausentes=True,
+    )
     estado_sistema.limpar_associacoes_epi_camera(camera_id)
+    estado_sistema.limpar_estados_epi_individuais_camera(camera_id)
+    processar_expiracao_temporal_camera(camera_id)
+    processar_incidentes_camera_sem_observacao(camera_id)
+
+
+# ============================================================
+# BIOMETRIA / IDENTIDADE - ETAPA 9
+# ============================================================
+
+def carregar_gerenciador_biometria():
+    global gerenciador_biometria
+
+    if gerenciador_biometria is not None:
+        return gerenciador_biometria
+
+    try:
+        def reconhecedor_factory():
+            return ReconhecedorFacial(
+                db_path=getattr(config, "PATH_BANCO_BIOMETRIA", "banco_biometria"),
+                model_name=getattr(config, "MODELO_FACE", "Facenet"),
+                detector_backend=getattr(config, "BIOMETRIA_DETECTOR_BACKEND", "opencv"),
+                distancia_maxima=float(getattr(config, "BIOMETRIA_DISTANCIA_MAXIMA", 0.40)),
+                margem_minima_top1_top2=float(getattr(
+                    config, "BIOMETRIA_MARGEM_MINIMA_TOP1_TOP2", 0.05
+                )),
+                confianca_rosto_minima=float(getattr(
+                    config, "BIOMETRIA_CONFIANCA_ROSTO_MINIMA", 0.80
+                )),
+                dimensao_rosto_minima=int(getattr(
+                    config, "BIOMETRIA_DIMENSAO_ROSTO_MINIMA", 48
+                )),
+            )
+
+        gerenciador_biometria = GerenciadorBiometriaAssincrona(
+            reconhecedor_factory=reconhecedor_factory,
+            caminho_dados_operadores=getattr(
+                config,
+                "PATH_DADOS_OPERADORES",
+                os.path.join("banco_biometria", "dados_operadores.csv"),
+            ),
+            fila_maxima=int(getattr(config, "BIOMETRIA_FILA_MAXIMA", 4)),
+        )
+        return gerenciador_biometria
+    except Exception as erro:
+        print(f"⚠️ Biometria indisponível: {erro}")
+        gerenciador_biometria = None
+        return None
+
+
+def processar_eventos_biometria():
+    gerenciador = gerenciador_biometria
+    if gerenciador is None:
+        return
+
+    latencias = []
+    for evento in gerenciador.obter_eventos():
+        if evento.tipo == EVENTO_JOB_INICIADO:
+            print(
+                f"[BIOMETRIA] Evento JOB_INICIADO | cam={evento.camera_id} "
+                f"| track={evento.track_id}"
+            )
+            estado_sistema.marcar_job_biometria_identificando(
+                evento.camera_id,
+                evento.track_instance_id,
+                evento.job_id,
+            )
+            continue
+
+        if evento.tipo != EVENTO_RESULTADO or evento.resultado is None:
+            continue
+
+        resultado = evento.resultado
+        reconhecimento = resultado.reconhecimento
+        print(
+            f"[BIOMETRIA] Evento RESULTADO | status={reconhecimento.status} "
+            f"| motivo={reconhecimento.motivo} "
+            f"| matricula={resultado.matricula}"
+        )
+        aplicado = estado_sistema.aplicar_resultado_biometria(
+            camera_id=resultado.camera_id,
+            track_instance_id=resultado.track_instance_id,
+            job_id=resultado.job_id,
+            observacao_id=resultado.observacao_id,
+            status_resultado=reconhecimento.status,
+            matricula=resultado.matricula,
+            nome=resultado.nome,
+            cargo=resultado.cargo,
+            distancia_match=reconhecimento.distancia_top1,
+            metodo=reconhecimento.metodo,
+            modelo=reconhecimento.modelo,
+            motivo=reconhecimento.motivo,
+            confirmacoes_identidade=int(getattr(
+                config, "BIOMETRIA_CONFIRMACOES_IDENTIDADE", 2
+            )),
+            confirmacoes_desconhecido=int(getattr(
+                config, "BIOMETRIA_CONFIRMACOES_DESCONHECIDO", 2
+            )),
+            conflitos_para_invalidar=int(getattr(
+                config, "BIOMETRIA_CONFLITOS_PARA_INVALIDAR", 2
+            )),
+        )
+        print(f"[BIOMETRIA] Resultado aplicado no estado: {aplicado}")
+        if aplicado and resultado.latencia_ms is not None:
+            latencias.append(float(resultado.latencia_ms))
+
+    if latencias:
+        estado_sistema.atualizar_latencia_biometria(
+            sum(latencias) / len(latencias)
+        )
+
+
+def _biometria_pode_agendar(identidade, agora):
+    if identidade.get("job_pendente_id"):
+        return False
+
+    ultima = identidade.get("ultima_tentativa_monotonica")
+    if ultima is None:
+        return True
+
+    status = identidade.get("status_identidade")
+    if status == "IDENTIFICADO":
+        intervalo = float(getattr(
+            config, "BIOMETRIA_REVALIDACAO_IDENTIFICADO_SEGUNDOS", 20.0
+        ))
+    else:
+        intervalo = float(getattr(config, "INTERVALO_BIOMETRIA_SEGUNDOS", 3.0))
+    return (float(agora) - float(ultima)) >= intervalo
+
+
+def processar_biometria_cameras(frames):
+    """Agenda biometria sem bloquear o pipeline principal de câmera/EPI."""
+    global sequencia_observacao_biometria
+
+    processar_eventos_biometria()
+    if not frames:
+        return
+
+    gerenciador = carregar_gerenciador_biometria()
+    if gerenciador is None:
+        return
+
+    for camera, frame in frames:
+        camera_id = int(camera.camera_id)
+        pessoas = estado_sistema.obter_contexto_biometria_camera(camera_id)
+        if not pessoas:
+            continue
+
+        sequencia = int(sequencia_observacao_biometria.get(camera_id, 0)) + 1
+        sequencia_observacao_biometria[camera_id] = sequencia
+        observacao_id = f"{camera_id}:{sequencia}"
+        agora = time.monotonic()
+
+        for pessoa in pessoas:
+            if not pessoa.get("detectado_no_frame"):
+                continue
+
+            identidade = pessoa.get("identidade") or {}
+            if not _biometria_pode_agendar(identidade, agora):
+                continue
+
+            crop = extrair_crop_facial_pessoa(
+                frame=frame,
+                pessoa=pessoa,
+                outras_pessoas=pessoas,
+                largura_minima=int(getattr(
+                    config, "BIOMETRIA_CROP_LARGURA_MINIMA", 64
+                )),
+                altura_minima=int(getattr(
+                    config, "BIOMETRIA_CROP_ALTURA_MINIMA", 64
+                )),
+                blur_variancia_minima=float(getattr(
+                    config, "BIOMETRIA_CROP_BLUR_VARIANCIA_MINIMA", 25.0
+                )),
+                brilho_minimo=float(getattr(
+                    config, "BIOMETRIA_CROP_BRILHO_MINIMO", 25.0
+                )),
+                brilho_maximo=float(getattr(
+                    config, "BIOMETRIA_CROP_BRILHO_MAXIMO", 235.0
+                )),
+                padding_proporcional=float(getattr(
+                    config, "BIOMETRIA_CROP_PADDING_PROPORCIONAL", 0.65
+                )),
+            )
+
+            if not crop.utilizavel:
+                print(
+                    f"[BIOMETRIA] Crop rejeitado | cam={camera_id} "
+                    f"| track={pessoa.get('track_id')} | motivo={crop.motivo}"
+                )
+                estado_sistema.marcar_rosto_biometrico_indisponivel(
+                    camera_id,
+                    pessoa["track_instance_id"],
+                    crop.motivo,
+                )
+                continue
+
+            print(
+                f"[BIOMETRIA] Crop OK | cam={camera_id} "
+                f"| track={pessoa.get('track_id')} "
+                f"| qualidade={crop.qualidade:.3f} "
+                f"| bbox={crop.bbox_face}"
+            )
+
+            job = gerenciador.criar_job(
+                camera_id=camera_id,
+                track_id=pessoa["track_id"],
+                track_instance_id=pessoa["track_instance_id"],
+                observacao_id=observacao_id,
+                crop=crop.crop,
+                agora_monotonico=agora,
+            )
+            if not gerenciador.enfileirar(job):
+                print("[BIOMETRIA] Fila cheia: job nao enfileirado")
+                continue
+
+            print(
+                f"[BIOMETRIA] Job enfileirado | id={job.job_id[:8]} "
+                f"| obs={job.observacao_id}"
+            )
+
+            estado_sistema.marcar_job_biometria_pendente(
+                camera_id=camera_id,
+                track_instance_id=pessoa["track_instance_id"],
+                job_id=job.job_id,
+                observacao_id=job.observacao_id,
+                agora_monotonico=agora,
+            )
+
+
+def encerrar_biometria():
+    global gerenciador_biometria
+    if gerenciador_biometria is not None:
+        try:
+            gerenciador_biometria.encerrar()
+        finally:
+            gerenciador_biometria = None
 
 
 # ============================================================
@@ -1181,10 +1452,11 @@ def capturar_frames_sincronizados(
                     falhas_consecutivas=camera.falhas_consecutivas
                 )
 
-                if status_rede == CAMERA_RECONECTANDO:
-                    marcar_tracking_camera_sem_frame(camera_id)
-                else:
-                    encerrar_tracking_camera(camera_id)
+                # A câmera de rede permanece cadastrada mesmo quando está
+                # OFFLINE/RECONECTANDO. Falta de frame é perda temporária de
+                # observação: o tracker pode encerrar sua instância interna,
+                # mas a memória temporal de EPI expira somente pela ETAPA 8.
+                marcar_tracking_camera_sem_frame(camera_id)
 
                 continue
 
@@ -1207,6 +1479,9 @@ def capturar_frames_sincronizados(
             else:
 
                 estado_sistema.limpar_associacoes_epi_camera(camera_id)
+                estado_sistema.limpar_estados_epi_individuais_camera(camera_id)
+                processar_expiracao_temporal_camera(camera_id)
+                processar_incidentes_camera_sem_observacao(camera_id)
                 continue
 
         frames.append(
@@ -2673,139 +2948,224 @@ def processar_associacoes_epi_pessoa(frames):
 
 
 # ============================================================
+# ESTADOS INDIVIDUAIS DE EPI - ETAPA 7
+# ============================================================
+
+def processar_estados_epi_individuais(frames):
+    """Produz somente o estado semântico instantâneo do frame atual.
+
+    Não usa status_epis agregado, não executa inferência e não mantém
+    qualquer memória temporal. A fonte dos EPIs obrigatórios é o ambiente
+    ativo dentro do EstadoSistema.
+    """
+    for camera, frame in (frames or []):
+        camera_id = int(camera.camera_id)
+        contexto = estado_sistema.obter_contexto_avaliacao_epi_camera(camera_id)
+        resultados = avaliar_estados_camera(
+            camera_id=camera_id,
+            pessoas=contexto["pessoas"],
+            associacoes_por_track=contexto["associacoes_por_track"],
+            evidencias_sem_associacao=contexto["evidencias_sem_associacao"],
+            epis_obrigatorios=contexto["epis_obrigatorios"],
+            frame_shape=getattr(frame, "shape", None),
+            frame=frame,
+            compatibilidade_correto_min=getattr(
+                config, "AVALIACAO_EPI_COMPATIBILIDADE_CORRETO_MIN", 0.60
+            ),
+            compatibilidade_incorreto_max=getattr(
+                config, "AVALIACAO_EPI_COMPATIBILIDADE_INCORRETO_MAX", 0.30
+            ),
+            negativa_utilizavel_min=getattr(
+                config, "AVALIACAO_EPI_NEGATIVA_UTILIZAVEL_MIN", 0.55
+            ),
+        )
+        estado_sistema.atualizar_estados_epi_individuais_camera(
+            camera_id,
+            resultados,
+        )
+
+
+# ============================================================
+# ESTABILIZAÇÃO TEMPORAL INDIVIDUAL - ETAPA 8
+# ============================================================
+
+def _configuracao_temporal_epi():
+    return {
+        "tempos_confirmacao": {
+            TEMPORAL_CORRETO: float(getattr(
+                config, "ESTABILIZACAO_EPI_TEMPO_CORRETO_SEGUNDOS", 1.0
+            )),
+            TEMPORAL_INCORRETO: float(getattr(
+                config, "ESTABILIZACAO_EPI_TEMPO_INCORRETO_SEGUNDOS", 1.5
+            )),
+            TEMPORAL_AUSENTE: float(getattr(
+                config, "ESTABILIZACAO_EPI_TEMPO_AUSENTE_SEGUNDOS", 2.0
+            )),
+        },
+        "tolerancia_indeterminado": float(getattr(
+            config, "ESTABILIZACAO_EPI_TOLERANCIA_INDETERMINADO_SEGUNDOS", 0.75
+        )),
+        "expiracao_indeterminado": float(getattr(
+            config, "ESTABILIZACAO_EPI_EXPIRACAO_INDETERMINADO_SEGUNDOS", 3.0
+        )),
+        "expiracao_sem_observacao": float(getattr(
+            config, "ESTABILIZACAO_EPI_EXPIRACAO_SEM_OBSERVACAO_SEGUNDOS", 3.0
+        )),
+    }
+
+
+def processar_estabilizacao_temporal_epi(frames):
+    """Estabiliza somente os estados instantâneos já produzidos pela ETAPA 7."""
+    parametros = _configuracao_temporal_epi()
+
+    for camera, _frame in (frames or []):
+        camera_id = int(camera.camera_id)
+        contexto = estado_sistema.obter_contexto_estabilizacao_epi_camera(camera_id)
+        agora = time.monotonic()
+
+        resultados = estabilizar_estados_camera(
+            camera_id=camera_id,
+            estados_instantaneos=contexto["estados_instantaneos"],
+            estados_anteriores=contexto["estados_temporais"],
+            tempos_confirmacao=parametros["tempos_confirmacao"],
+            tolerancia_indeterminado_segundos=parametros["tolerancia_indeterminado"],
+            expiracao_indeterminado_segundos=parametros["expiracao_indeterminado"],
+            agora_monotonico=agora,
+        )
+
+        chaves_observadas = {
+            (camera_id, item.track_instance_id, item.epi)
+            for item in resultados
+        }
+        obrigatorios = set(contexto["epis_obrigatorios"])
+        for chave, anterior in contexto["estados_temporais"].items():
+            if chave in chaves_observadas or anterior.epi not in obrigatorios:
+                continue
+            resultados.append(
+                expirar_estado_sem_observacao(
+                    anterior,
+                    expiracao_sem_observacao_segundos=parametros[
+                        "expiracao_sem_observacao"
+                    ],
+                    agora_monotonico=agora,
+                )
+            )
+
+        resultados.sort(
+            key=lambda item: (item.camera_id, item.track_instance_id, item.epi)
+        )
+        estado_sistema.atualizar_estados_epi_temporais_camera(
+            camera_id,
+            resultados,
+        )
+
+
+def processar_expiracao_temporal_camera(camera_id):
+    """Avança somente a expiração temporal quando não há frame observável."""
+    camera_id = int(camera_id)
+    contexto = estado_sistema.obter_contexto_estabilizacao_epi_camera(camera_id)
+    if not contexto["estados_temporais"]:
+        return
+
+    parametros = _configuracao_temporal_epi()
+    agora = time.monotonic()
+    obrigatorios = set(contexto["epis_obrigatorios"])
+    resultados = [
+        expirar_estado_sem_observacao(
+            anterior,
+            expiracao_sem_observacao_segundos=parametros[
+                "expiracao_sem_observacao"
+            ],
+            agora_monotonico=agora,
+        )
+        for anterior in contexto["estados_temporais"].values()
+        if anterior.epi in obrigatorios
+    ]
+    resultados.sort(
+        key=lambda item: (item.camera_id, item.track_instance_id, item.epi)
+    )
+    estado_sistema.atualizar_estados_epi_temporais_camera(camera_id, resultados)
+
+
+# ============================================================
 # INCIDENTES DE EPI
 # ============================================================
 
-def processar_incidentes_epis(
-    status_epis,
-    frames,
-    operador
-):
-
-    obrigatorios = list(
-        getattr(
-            config,
-            "EPIS_OBRIGATORIOS",
-            []
+def carregar_gestor_incidentes_epi():
+    global gestor_incidentes_epi
+    if gestor_incidentes_epi is None:
+        gestor_incidentes_epi = GestorIncidentesEPI(
+            estado_sistema=estado_sistema,
+            caminho_csv=getattr(config, "PATH_INCIDENTES_EPI_CSV", "incidentes_epi.csv"),
+            pasta_evidencias=getattr(config, "PASTA_PROVAS_INCIDENTES", "provas_incidentes"),
+            intervalo_evidencia_segundos=float(getattr(
+                config, "INCIDENTE_INTERVALO_EVIDENCIA_PERSISTENCIA_SEGUNDOS", 300
+            )),
+            qualidade_jpeg=int(getattr(config, "INCIDENTE_QUALIDADE_JPEG", 90)),
+            salvar_frame_completo=bool(getattr(
+                config, "INCIDENTE_SALVAR_FRAME_COMPLETO", True
+            )),
+            salvar_crop_pessoa=bool(getattr(
+                config, "INCIDENTE_SALVAR_CROP_PESSOA", True
+            )),
         )
-    )
+    return gestor_incidentes_epi
 
-    ambiente = getattr(
-        config,
-        "NOME_AMBIENTE",
-        "Ambiente Principal"
-    )
 
-    # Até a biometria ser integrada ao main,
-    # usamos uma matrícula estável para não criar
-    # uma chave diferente a cada frame.
-    matricula = "DESCONHECIDO"
-
-    chaves_detectadas = set()
-
-    if not frames:
-
-        atualizar_incidentes_ausentes(
-            chaves_detectadas
-        )
-
-        return
-
-    for epi in obrigatorios:
-
-        presente = bool(
-            status_epis.get(
-                epi,
-                False
+def processar_incidentes_epi_individuais(frames):
+    gestor = carregar_gestor_incidentes_epi()
+    for camera, frame in (frames or []):
+        try:
+            gestor.processar_camera(
+                camera_id=int(camera.camera_id),
+                frame=frame,
+                camera_nome=getattr(camera, "nome", None),
             )
+        except Exception as erro:
+            # ETAPA 10 nunca pode interromper o pipeline de segurança.
+            print(f"⚠️ Erro controlado na gestão de incidentes: {erro}")
+
+
+def processar_incidentes_camera_sem_observacao(camera_id):
+    gestor = carregar_gestor_incidentes_epi()
+    try:
+        gestor.processar_camera_sem_observacao(int(camera_id))
+    except Exception as erro:
+        print(f"⚠️ Erro controlado em incidente sem observação: {erro}")
+
+
+# ============================================================
+# NOTIFICACOES E ALERTAS - ETAPA 11
+# ============================================================
+
+def carregar_gestor_notificacoes_incidentes():
+    global gestor_notificacoes_incidentes
+    if gestor_notificacoes_incidentes is None:
+        gestor_notificacoes_incidentes = GestorNotificacoesIncidentes(
+            estado_sistema=estado_sistema,
+            ativar_visual=bool(getattr(config, "ATIVAR_ALERTA_VISUAL", True)),
+            ativar_audio=bool(getattr(config, "ATIVAR_ALERTA_AUDIO", True)),
+            ativar_email=bool(getattr(config, "ATIVAR_ALERTA_EMAIL", True)),
+            severidade_padrao=str(getattr(config, "NOTIFICACAO_SEVERIDADE_PADRAO", "ALTA")),
+            intervalo_audio_segundos=float(getattr(config, "NOTIFICACAO_AUDIO_INTERVALO_SEGUNDOS", 7.0)),
+            audio_fila_maxima=int(getattr(config, "NOTIFICACAO_AUDIO_FILA_MAXIMA", 8)),
+            audio_retry_fila_segundos=float(getattr(config, "NOTIFICACAO_AUDIO_RETRY_FILA_SEGUNDOS", 1.0)),
+            email_atraso_segundos=float(getattr(config, "NOTIFICACAO_EMAIL_ATRASO_SEGUNDOS", 15.0)),
+            email_fila_maxima=int(getattr(config, "NOTIFICACAO_EMAIL_FILA_MAXIMA", 8)),
+            email_max_tentativas=int(getattr(config, "NOTIFICACAO_EMAIL_MAX_TENTATIVAS", 3)),
+            email_retry_segundos=float(getattr(config, "NOTIFICACAO_EMAIL_RETRY_SEGUNDOS", 30.0)),
+            email_retry_fila_segundos=float(getattr(config, "NOTIFICACAO_EMAIL_RETRY_FILA_SEGUNDOS", 1.0)),
+            email_repeticao_segundos=getattr(config, "NOTIFICACAO_EMAIL_REPETICAO_SEGUNDOS", None),
         )
+    return gestor_notificacoes_incidentes
 
-        if presente:
-            continue
 
-        # ----------------------------------------------------
-        # Escolhe preferencialmente uma câmera que tenha
-        # detectado explicitamente a ausência deste EPI.
-        # Se não houver, usa a primeira câmera disponível.
-        # ----------------------------------------------------
-
-        camera_escolhida = None
-        frame_escolhido = None
-        melhor_confianca = -1.0
-
-        for (
-            camera_id,
-            detalhes
-        ) in detalhes_epis_cameras.items():
-
-            if epi in detalhes.get(
-                "ausentes",
-                set()
-            ):
-
-                confianca = detalhes.get(
-                    "confiancas_ausencia",
-                    {}
-                ).get(
-                    epi,
-                    0.0
-                )
-
-                if confianca > melhor_confianca:
-
-                    camera_escolhida = detalhes.get(
-                        "camera"
-                    )
-
-                    frame_escolhido = detalhes.get(
-                        "frame"
-                    )
-
-                    melhor_confianca = confianca
-
-        if camera_escolhida is None:
-
-            camera_escolhida, frame_escolhido = (
-                frames[0]
-            )
-
-        camera_id = getattr(
-            camera_escolhida,
-            "camera_id",
-            None
-        )
-
-        camera_nome = getattr(
-            camera_escolhida,
-            "nome",
-            "Camera"
-        )
-
-        chave = criar_chave_incidente(
-            camera_id,
-            matricula,
-            epi
-        )
-
-        chaves_detectadas.add(
-            chave
-        )
-
-        processar_incidente(
-            camera_id=camera_id,
-            camera_nome=camera_nome,
-            ambiente=ambiente,
-            matricula=matricula,
-            operador=operador,
-            tipo_infracao=epi,
-            severidade="ALTA",
-            frame=frame_escolhido
-        )
-
-    # Remove/reset incidentes que deixaram de existir.
-    atualizar_incidentes_ausentes(
-        chaves_detectadas
-    )
+def processar_notificacoes_incidentes():
+    try:
+        carregar_gestor_notificacoes_incidentes().processar()
+    except Exception as erro:
+        # Falha de canal/notificação nunca pode interromper o monitoramento.
+        print(f"⚠️ Erro controlado na ETAPA 11 de notificações: {erro}")
 
 
 # ============================================================
@@ -2815,22 +3175,109 @@ def processar_incidentes_epis(
 def calcular_severidade_epi(
     status_epis
 ):
-
+    """Calcula severidade a partir dos estados finais da ETAPA 8."""
     if not status_epis:
-
         return "NORMAL"
 
-    faltando = any(
-        not presente
-        for presente
-        in status_epis.values()
-    )
+    estados = {
+        str(estado)
+        for estado in status_epis.values()
+        if estado is not None
+    }
 
-    if faltando:
-
+    if "AUSENTE" in estados or "INCORRETO" in estados:
         return "ALTA"
 
     return "NORMAL"
+
+
+def obter_dados_painel_monitoramento():
+    """Projeta identidade e EPI do EstadoSistema para o painel legado.
+
+    A inferência best.pt continua sendo executada por analisar_epis_cameras()
+    porque suas detecções alimentam as ETAPAS 6-8. Porém o painel deixa de
+    usar o booleano agregado legado e passa a exibir o estado individual
+    temporal da pessoa selecionada.
+    """
+    snapshot = estado_sistema.snapshot()
+    epis_obrigatorios = list(
+        snapshot.get("ambiente", {}).get("epis_obrigatorios", ())
+    )
+
+    pessoas = []
+    for _chave, pessoa in snapshot.get("pessoas", {}).items():
+        if not pessoa.get("ativo", True):
+            continue
+        if not pessoa.get("detectado_no_frame", False):
+            continue
+        pessoas.append(pessoa)
+
+    pessoas.sort(
+        key=lambda pessoa: (
+            int(pessoa.get("camera_id", 0)),
+            int(pessoa.get("track_id", 0)),
+            str(pessoa.get("track_instance_id", "")),
+        )
+    )
+
+    if not pessoas:
+        return (
+            {epi: "INDETERMINADO" for epi in epis_obrigatorios},
+            "Nenhum operador",
+            "NORMAL",
+            {
+                "estado": "INDETERMINADA",
+                "problemas": [],
+                "modo": "INDETERMINADA",
+            },
+        )
+
+    pessoa = pessoas[0]
+    camera_id = int(pessoa.get("camera_id", 0))
+    track_instance_id = str(pessoa.get("track_instance_id", ""))
+
+    identidade = pessoa.get("identidade") or {}
+    status_identidade = str(
+        identidade.get("status_identidade") or "NAO_AVALIADO"
+    )
+    status_processamento = str(
+        identidade.get("status_processamento") or "OCIOSO"
+    )
+
+    if status_identidade == "IDENTIFICADO":
+        nome = str(identidade.get("nome") or "DESCONHECIDO")
+        matricula = str(identidade.get("matricula") or "--")
+        operador = f"{nome} | {matricula}"
+    elif status_identidade == "DESCONHECIDO":
+        operador = "DESCONHECIDO"
+    elif status_processamento in {"EM_FILA", "IDENTIFICANDO"}:
+        operador = "Buscando Biometria..."
+    else:
+        operador = "Buscando Biometria..."
+
+    temporais = snapshot.get("estados_epi_temporais", {})
+    status_epis = {}
+
+    for epi in epis_obrigatorios:
+        chave_alvo = (camera_id, track_instance_id, epi)
+        estado_temporal = temporais.get(chave_alvo)
+
+        if estado_temporal is None:
+            status_epis[epi] = "INDETERMINADO"
+            continue
+
+        confirmado = estado_temporal.get("estado_confirmado")
+        if confirmado in {"CORRETO", "INCORRETO", "AUSENTE", "INDETERMINADO"}:
+            status_epis[epi] = confirmado
+        else:
+            status_epis[epi] = "INDETERMINADO"
+
+    severidade = calcular_severidade_epi(status_epis)
+    status_ergonomia = obter_estado_ergonomia(
+        camera_id,
+        track_instance_id,
+    )
+    return status_epis, operador, severidade, status_ergonomia
 
 
 # ============================================================
@@ -2984,7 +3431,8 @@ def criar_painel(
     cameras,
     status_epis=None,
     operador="Buscando Biometria...",
-    severidade="NORMAL"
+    severidade="NORMAL",
+    status_ergonomia=None,
 ):
 
     largura = getattr(
@@ -2999,10 +3447,6 @@ def criar_painel(
     )
 
     painel[:] = (28, 28, 28)
-
-    # ========================================================
-    # CABECALHO
-    # ========================================================
 
     cv2.putText(
         painel,
@@ -3023,10 +3467,6 @@ def criar_painel(
         1
     )
 
-    # ========================================================
-    # OPERADOR
-    # ========================================================
-
     cv2.putText(
         painel,
         "OPERADOR",
@@ -3039,7 +3479,6 @@ def criar_painel(
     )
 
     operador_tela = str(operador)
-
     if len(operador_tela) > 30:
         operador_tela = operador_tela[:30] + "..."
 
@@ -3053,10 +3492,6 @@ def criar_painel(
         1,
         cv2.LINE_AA
     )
-
-    # ========================================================
-    # SEVERIDADE
-    # ========================================================
 
     cv2.putText(
         painel,
@@ -3087,10 +3522,6 @@ def criar_painel(
         cv2.LINE_AA
     )
 
-    # ========================================================
-    # ESTADO
-    # ========================================================
-
     cv2.putText(
         painel,
         "ESTADO",
@@ -3105,11 +3536,9 @@ def criar_painel(
     if estado_sistema.fase_execucao == config.ESTADO_CALIBRACAO_AMBIENTE:
         texto_estado = "ANALISE DO AMBIENTE"
         cor_estado = (0, 220, 255)
-
     elif estado_sistema.fase_execucao == config.ESTADO_CONFIGURACAO_EPI:
         texto_estado = "CONFIGURACAO EPI"
         cor_estado = (0, 220, 255)
-
     else:
         texto_estado = "MONITORAMENTO"
         cor_estado = (0, 200, 0)
@@ -3132,10 +3561,6 @@ def criar_painel(
         (80, 80, 80),
         1
     )
-
-    # ========================================================
-    # EPIs OBRIGATORIOS
-    # ========================================================
 
     cv2.putText(
         painel,
@@ -3162,7 +3587,6 @@ def criar_painel(
     y = 246
 
     if not epis_obrigatorios:
-
         cv2.putText(
             painel,
             "Nenhum EPI selecionado",
@@ -3173,88 +3597,228 @@ def criar_painel(
             1,
             cv2.LINE_AA
         )
-
-        return painel
-
-    # Ajusta automaticamente o espacamento conforme a altura.
-    espaco_disponivel = max(
-        1,
-        altura - y - 8
-    )
-
-    passo = min(
-        38,
-        max(
-            22,
-            espaco_disponivel // max(
-                1,
-                len(epis_obrigatorios)
+        y += 34
+    else:
+        # Reserva a parte inferior para ergonomia.
+        limite_epis = max(y + 30, altura - 155)
+        espaco_disponivel = max(1, limite_epis - y)
+        passo = min(
+            38,
+            max(
+                22,
+                espaco_disponivel // max(1, len(epis_obrigatorios))
             )
         )
-    )
 
-    for epi in epis_obrigatorios:
+        for epi in epis_obrigatorios:
+            if y > limite_epis:
+                break
 
-        if y > altura - 8:
-            break
+            estado_epi = str(
+                status_epis.get(epi, "INDETERMINADO")
+            )
 
-        presente = bool(
-            status_epis.get(
+            if estado_epi == "CORRETO":
+                texto_status = "CORRETO"
+                cor_epi = (0, 200, 0)
+            elif estado_epi == "INCORRETO":
+                texto_status = "INCORRETO"
+                cor_epi = (0, 165, 255)
+            elif estado_epi == "AUSENTE":
+                texto_status = "AUSENTE"
+                cor_epi = (0, 0, 255)
+            else:
+                texto_status = "INDETERMINADO"
+                cor_epi = (0, 220, 255)
+
+            cv2.putText(
+                painel,
                 epi,
-                False
+                (16, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.39,
+                cor_epi,
+                2,
+                cv2.LINE_AA
             )
-        )
 
-        if presente:
-            texto_status = "EM USO"
-            cor_epi = (0, 200, 0)
-        else:
-            texto_status = "NAO EM USO"
-            cor_epi = (0, 0, 255)
+            tamanho_status, _ = cv2.getTextSize(
+                texto_status,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.34,
+                1
+            )
 
-        # Nome do EPI na propria cor do status.
-        cv2.putText(
+            x_status = largura - tamanho_status[0] - 16
+
+            cv2.putText(
+                painel,
+                texto_status,
+                (x_status, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.34,
+                cor_epi,
+                1,
+                cv2.LINE_AA
+            )
+
+            cv2.line(
+                painel,
+                (16, y + 8),
+                (largura - 16, y + 8),
+                (60, 60, 60),
+                1
+            )
+
+            y += passo
+
+    # ========================================================
+    # ERGONOMIA / POSTURA
+    # ========================================================
+
+    y_ergonomia = max(y + 12, altura - 145)
+    if y_ergonomia < altura - 25:
+        cv2.line(
             painel,
-            epi,
-            (16, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.39,
-            cor_epi,
-            2,
-            cv2.LINE_AA
-        )
-
-        tamanho_status, _ = cv2.getTextSize(
-            texto_status,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.34,
+            (16, y_ergonomia - 12),
+            (largura - 16, y_ergonomia - 12),
+            (80, 80, 80),
             1
         )
 
-        x_status = largura - tamanho_status[0] - 16
-
         cv2.putText(
             painel,
-            texto_status,
-            (x_status, y),
+            "ERGONOMIA / POSTURA",
+            (16, y_ergonomia),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.34,
-            cor_epi,
+            (160, 160, 160),
             1,
             cv2.LINE_AA
         )
 
-        cv2.line(
-            painel,
-            (16, y + 8),
-            (largura - 16, y + 8),
-            (60, 60, 60),
-            1
+        if status_ergonomia is None:
+            status_ergonomia = {
+                "estado": "INDETERMINADA",
+                "problemas": [],
+                "modo": "INDETERMINADA",
+            }
+
+        estado_postura = str(
+            status_ergonomia.get(
+                "estado",
+                "INDETERMINADA"
+            )
         )
 
-        y += passo
+        problemas = list(
+            status_ergonomia.get(
+                "problemas",
+                []
+            )
+        )
+
+        modo_postura = str(
+            status_ergonomia.get(
+                "modo",
+                "INDETERMINADA"
+            )
+        )
+
+        if modo_postura == "SENTADA":
+            texto_posicao = "POSICAO: SENTADO"
+            cor_posicao = (255, 255, 255)
+        elif modo_postura == "EM_PE":
+            texto_posicao = "POSICAO: EM PE"
+            cor_posicao = (255, 255, 255)
+        else:
+            texto_posicao = "POSICAO: INDETERMINADA"
+            cor_posicao = (0, 220, 255)
+
+        y_linha = y_ergonomia + 22
+
+        cv2.putText(
+            painel,
+            texto_posicao,
+            (16, y_linha),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            cor_posicao,
+            1,
+            cv2.LINE_AA
+        )
+
+        y_linha += 22
+
+        if estado_postura == "ADEQUADA":
+            cv2.putText(
+                painel,
+                "ADEQUADA",
+                (16, y_linha),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (0, 200, 0),
+                2,
+                cv2.LINE_AA
+            )
+
+        elif estado_postura == "INADEQUADA":
+            cv2.putText(
+                painel,
+                "Postura geral - INADEQUADA",
+                (16, y_linha),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.36,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA
+            )
+
+            y_linha += 22
+
+            for problema in problemas[:2]:
+                regiao = str(
+                    problema.get("regiao", "Postura")
+                )
+                descricao = str(
+                    problema.get("descricao", "INADEQUADA")
+                )
+
+                texto = f"{regiao} - {descricao}"
+                if len(texto) > 36:
+                    texto = texto[:36] + "..."
+
+                if y_linha >= altura - 8:
+                    break
+
+                cv2.putText(
+                    painel,
+                    texto,
+                    (16, y_linha),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.31,
+                    (0, 0, 255),
+                    1,
+                    cv2.LINE_AA
+                )
+
+                y_linha += 20
+
+        else:
+            cv2.putText(
+                painel,
+                "INDETERMINADA",
+                (16, y_linha),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (0, 220, 255),
+                1,
+                cv2.LINE_AA
+            )
 
     return painel
+
+
 # ============================================================
 # PERFIS DE AMBIENTE + IDENTIDADE DE CÂMERAS - ETAPAS 3 E 4
 # ============================================================
@@ -4103,6 +4667,11 @@ def main():
             status_epis = {}
             operador = "Buscando Biometria..."
             severidade = "NORMAL"
+            status_ergonomia = {
+                "estado": "INDETERMINADA",
+                "problemas": [],
+                "modo": "INDETERMINADA",
+            }
 
             # =================================================
             # CALIBRACAO
@@ -4163,25 +4732,11 @@ def main():
                 frames_visuais = frames
 
                 if frames:
-                    status_epis = analisar_epis_cameras(
+                    # Mantém a única inferência best.pt e a coleta de
+                    # deteccoes_epi usadas pelas ETAPAS 6-8.
+                    # O retorno booleano legado NÃO alimenta mais o painel.
+                    analisar_epis_cameras(
                         frames
-                    )
-
-                    severidade = calcular_severidade_epi(
-                        status_epis
-                    )
-
-                    processar_incidentes_epis(
-                        status_epis,
-                        frames,
-                        operador
-                    )
-
-                    atualizar_notificacoes(
-                        status_epis=status_epis,
-                        frames=frames,
-                        operador=operador,
-                        severidade=severidade
                     )
 
                     # ETAPA 5: Pose e tracking são processados somente
@@ -4189,13 +4744,47 @@ def main():
                     # eventual overlay de debug nunca contamine evidências.
                     frames_visuais = processar_pose_cameras(frames)
 
+                    # ETAPA 9: camada paralela ao EPI. Apenas agenda crops
+                    # dos tracks atuais e coleta resultados assíncronos.
+                    processar_biometria_cameras(frames)
+
                     # ETAPA 6: usa as detecções preservadas da mesma
                     # inferência best.pt e os tracks observados neste frame.
                     processar_associacoes_epi_pessoa(frames)
+
+                    # ETAPA 7: interpreta somente as evidências atuais da
+                    # ETAPA 6 por pessoa/EPI obrigatório do ambiente.
+                    processar_estados_epi_individuais(frames)
+
+                    # ETAPA 8: estabiliza somente os estados instantâneos da
+                    # ETAPA 7, com tempo monotônico e isolamento por track.
+                    processar_estabilizacao_temporal_epi(frames)
+
+                    # ETAPA 10: incidentes consomem exclusivamente estados
+                    # confirmados da ETAPA 8; não usam YOLO/ETAPA 7 diretamente.
+                    processar_incidentes_epi_individuais(frames)
+
+                    # ETAPA 11: consome exclusivamente os incidentes já
+                    # consolidados pela ETAPA 10/EstadoSistema.
+                    processar_notificacoes_incidentes()
+
+                    # Painel: lê a identidade e os estados confirmados da
+                    # ETAPA 8 diretamente do EstadoSistema.
+                    status_epis, operador, severidade, status_ergonomia = (
+                        obter_dados_painel_monitoramento()
+                    )
                 else:
                     estado_sistema.atualizar_latencia_pose(None)
+                    processar_eventos_biometria()
                     for camera_id in list(cameras.keys()):
                         estado_sistema.limpar_associacoes_epi_camera(camera_id)
+                        estado_sistema.limpar_estados_epi_individuais_camera(camera_id)
+                        processar_expiracao_temporal_camera(camera_id)
+                        processar_incidentes_camera_sem_observacao(camera_id)
+                    processar_notificacoes_incidentes()
+                    status_epis, operador, severidade, status_ergonomia = (
+                        obter_dados_painel_monitoramento()
+                    )
 
             # =================================================
             # CONFIGURACAO DE EPI
@@ -4219,7 +4808,8 @@ def main():
                     cameras,
                     status_epis=status_epis,
                     operador=operador,
-                    severidade=severidade
+                    severidade=severidade,
+                    status_ergonomia=status_ergonomia,
                 )
 
                 tela = np.hstack(
@@ -4268,11 +4858,9 @@ def main():
     finally:
 
         try:
-            encerrar_notificacoes()
+            encerrar_biometria()
         except Exception as erro:
-            print(
-                f"⚠️ Erro ao encerrar notificações: {erro}"
-            )
+            print(f"⚠️ Erro ao encerrar biometria: {erro}")
 
         for camera in list(
             cameras.values()
