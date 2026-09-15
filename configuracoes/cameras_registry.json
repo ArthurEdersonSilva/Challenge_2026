@@ -2,36 +2,92 @@
     "schema_version": 1,
     "cameras": [
         {
-            "camera_uid": "edece480-72da-4d0d-a270-b5903ab0fa4b",
+            "camera_uid": "6cdd37e1-0fff-40cd-aabd-f3b92d690f9b",
             "nome": "Teste 1",
             "tipo": "rtsp",
             "identidade": {
                 "tipo": "camera_rede_logica"
             },
             "conexao": {
-                "fonte": "rtsp://192.168.0.2:8554/",
-                "host": "192.168.0.2",
-                "porta": 8554,
-                "caminho_stream": "/",
+                "fonte": "rtsp://admin:SIDI2023@10.14.22.97:554/cam/realmonitor?channel=1&subtype=0",
+                "host": "10.14.22.97",
+                "porta": 554,
+                "caminho_stream": "/cam/realmonitor?channel=1&subtype=0",
                 "tipo_stream": "rtsp",
                 "onvif": false,
                 "resolucao": {
-                    "largura": 960,
-                    "altura": 1280
+                    "largura": 1920,
+                    "altura": 1080
                 },
-                "fps": null
+                "fps": 30.0
             },
             "compatibilidade": {
                 "config_index_legado": 0
             },
             "metadata": {
-                "criado_em": "2026-08-30T02:58:21.741638+00:00",
-                "atualizado_em": "2026-08-30T02:58:21.741638+00:00"
+                "criado_em": "2026-09-10T12:28:07.213527+00:00",
+                "atualizado_em": "2026-09-10T12:28:07.213527+00:00"
+            }
+        },
+        {
+            "camera_uid": "f8beea31-ea87-4ec6-8e7d-c41a4a277d0f",
+            "nome": "Teste 2",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://admin:SIDI2023@10.14.22.98:554/cam/realmonitor?channel=1&subtype=0",
+                "host": "10.14.22.98",
+                "porta": 554,
+                "caminho_stream": "/cam/realmonitor?channel=1&subtype=0",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": {
+                    "largura": 1920,
+                    "altura": 1080
+                },
+                "fps": 30.0
+            },
+            "compatibilidade": {
+                "config_index_legado": 1
+            },
+            "metadata": {
+                "criado_em": "2026-09-10T12:28:07.502437+00:00",
+                "atualizado_em": "2026-09-10T12:28:07.502437+00:00"
+            }
+        },
+        {
+            "camera_uid": "312ca746-58d5-440e-ac1c-e179ce68113e",
+            "nome": "SICK",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://10.14.22.96:554/video",
+                "host": "10.14.22.96",
+                "porta": 554,
+                "caminho_stream": "/video",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": {
+                    "largura": 1024,
+                    "altura": 576
+                },
+                "fps": null
+            },
+            "compatibilidade": {
+                "config_index_legado": 2
+            },
+            "metadata": {
+                "criado_em": "2026-09-10T12:28:07.811534+00:00",
+                "atualizado_em": "2026-09-10T12:28:07.811534+00:00"
             }
         }
     ],
     "metadata": {
-        "criado_em": "2026-08-30T02:58:21.741638+00:00",
-        "atualizado_em": "2026-08-30T02:58:21.741638+00:00"
+        "criado_em": "2026-09-10T12:28:07.213527+00:00",
+        "atualizado_em": "2026-09-10T12:28:07.811534+00:00"
     }
 }

@@ -1,21 +1,53 @@
 {
     "versao": 1,
-    "atualizado_em": "2026-08-29 23:57:16",
+    "atualizado_em": "2026-09-10 09:27:12",
     "modo": "wifi",
     "cameras": [
         {
             "nome": "Teste 1",
             "tipo": "rtsp",
-            "fonte": "rtsp://192.168.0.2:8554/",
-            "ip": "192.168.0.2",
+            "fonte": "rtsp://admin:SIDI2023@10.14.22.97:554/cam/realmonitor?channel=1&subtype=0",
+            "ip": "10.14.22.97",
             "ativa": true,
             "onvif": false,
             "portas_detectadas": [
-                8554
+                554
             ],
             "resolucao": {
-                "largura": 960,
-                "altura": 1280
+                "largura": 1920,
+                "altura": 1080
+            },
+            "fps": 30.0
+        },
+        {
+            "nome": "Teste 2",
+            "tipo": "rtsp",
+            "fonte": "rtsp://admin:SIDI2023@10.14.22.98:554/cam/realmonitor?channel=1&subtype=0",
+            "ip": "10.14.22.98",
+            "ativa": true,
+            "onvif": false,
+            "portas_detectadas": [
+                554
+            ],
+            "resolucao": {
+                "largura": 1920,
+                "altura": 1080
+            },
+            "fps": 30.0
+        },
+        {
+            "nome": "SICK",
+            "tipo": "rtsp",
+            "fonte": "rtsp://10.14.22.96:554/video",
+            "ip": "10.14.22.96",
+            "ativa": true,
+            "onvif": false,
+            "portas_detectadas": [
+                554
+            ],
+            "resolucao": {
+                "largura": 1024,
+                "altura": 576
             },
             "fps": null
         }
