@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import time
 import uuid
@@ -213,6 +214,70 @@ class GestorIncidentesEPI:
             return True
         return (agora_mono - float(ultima)) >= self.intervalo_evidencia_segundos
 
+    def _salvar_metadata_evidencia(
+        self,
+        incidente,
+        evidencia_id: str,
+        pasta: str,
+        agora_dt: datetime,
+    ) -> Optional[str]:
+        """Persiste metadados complementares sem alterar o CSV histórico.
+
+        Falha deste arquivo nunca invalida a imagem nem a verdade operacional.
+        """
+        contexto = self.estado_sistema.obter_contexto_metadata_evidencia(
+            camera_id=incidente.camera_id,
+            track_instance_id=incidente.track_instance_id,
+            epi_incidente=incidente.epi,
+        )
+
+        metadata = {
+            "schema_version": 1,
+            "evidencia_id": str(evidencia_id),
+            "incidente_id": str(incidente.incidente_id),
+            "criado_em": agora_dt.isoformat(),
+            "confianca_deteccao": contexto.get(
+                "confianca_deteccao"
+            ),
+            "epis_analisados": list(
+                contexto.get("epis_analisados") or []
+            ),
+            "maquinario_relacionado": contexto.get(
+                "maquinario_relacionado"
+            ),
+        }
+
+        destino = os.path.join(
+            pasta,
+            f"{evidencia_id}_metadata.json",
+        )
+        temporario = f"{destino}.tmp"
+
+        try:
+            with open(
+                temporario,
+                "w",
+                encoding="utf-8",
+            ) as arquivo:
+                json.dump(
+                    metadata,
+                    arquivo,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                arquivo.flush()
+                os.fsync(arquivo.fileno())
+
+            os.replace(temporario, destino)
+            return destino
+        except Exception:
+            try:
+                if os.path.exists(temporario):
+                    os.remove(temporario)
+            except Exception:
+                pass
+            raise
+
     def _capturar_evidencia(self, incidente, frame, bbox, agora_mono: float, agora_dt: datetime) -> None:
         # Marca tentativa primeiro: falha de IO não causa retry a cada frame.
         self.estado_sistema.marcar_tentativa_evidencia_incidente(
@@ -255,6 +320,16 @@ class GestorIncidentesEPI:
                     falhas.append(f"CROP:{erro}")
 
         if caminhos_validos["frame"] or caminhos_validos["crop"]:
+            try:
+                self._salvar_metadata_evidencia(
+                    incidente=incidente,
+                    evidencia_id=evidencia_id,
+                    pasta=pasta,
+                    agora_dt=agora_dt,
+                )
+            except Exception as erro:
+                falhas.append(f"METADATA:{erro}")
+
             evidencia = self.estado_sistema.registrar_evidencia_incidente(
                 incidente.incidente_id,
                 evidencia_id=evidencia_id,

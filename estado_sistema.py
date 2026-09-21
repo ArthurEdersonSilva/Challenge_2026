@@ -1079,6 +1079,87 @@ class EstadoSistema:
                 "estados_temporais": tuple(estados),
             }
 
+    def obter_contexto_metadata_evidencia(
+        self,
+        camera_id: int,
+        track_instance_id: str,
+        epi_incidente: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retorna somente dados reais já presentes no runtime para enriquecer
+        uma NOVA evidência persistida.
+
+        Não cria inferências novas e não tenta reconstruir evidências antigas.
+        A confiança representa a maior confiança de detecção realmente
+        registrada nas evidências semânticas do EPI naquele instante.
+
+        A relação pessoa/incidente -> maquinário ainda não possui contrato
+        operacional no runtime atual; portanto permanece None até que uma
+        associação explícita seja produzida por outro módulo.
+        """
+        with self._lock:
+            camera_id = int(camera_id)
+            track_instance_id = str(track_instance_id)
+            epi_incidente = (
+                None
+                if epi_incidente is None
+                else str(epi_incidente)
+            )
+
+            epis_analisados = []
+            confianca_incidente = None
+
+            for chave, item in self.estados_epi_individuais.items():
+                if chave[0] != camera_id or chave[1] != track_instance_id:
+                    continue
+
+                confiancas = []
+                evidencias = (
+                    tuple(item.evidencias_positivas)
+                    + tuple(item.evidencias_negativas)
+                    + tuple(item.evidencias_ambiguas)
+                )
+
+                for evidencia in evidencias:
+                    valor = getattr(
+                        evidencia,
+                        "confianca_deteccao",
+                        None,
+                    )
+                    if valor is None:
+                        continue
+                    try:
+                        confiancas.append(float(valor))
+                    except (TypeError, ValueError):
+                        continue
+
+                confianca_epi = (
+                    max(confiancas)
+                    if confiancas
+                    else None
+                )
+
+                epis_analisados.append({
+                    "epi": str(item.epi),
+                    "estado": str(item.estado),
+                    "confianca_deteccao": confianca_epi,
+                })
+
+                if (
+                    epi_incidente is not None
+                    and str(item.epi) == epi_incidente
+                ):
+                    confianca_incidente = confianca_epi
+
+            epis_analisados.sort(
+                key=lambda item: item["epi"].casefold()
+            )
+
+            return {
+                "confianca_deteccao": confianca_incidente,
+                "epis_analisados": epis_analisados,
+                "maquinario_relacionado": None,
+            }
+
     def garantir_incidente_epi_atomico(
         self, ambiente_id, ambiente_nome, camera_id, camera_nome, track_id,
         track_instance_id, epi, tipo_irregularidade, identidade,

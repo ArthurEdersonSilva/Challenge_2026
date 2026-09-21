@@ -12,6 +12,14 @@ import config
 import ambientes
 import camera_registry
 
+from services.camera_service import (
+    buscar_cameras as buscar_cameras_rede,
+    testar_camera_descoberta,
+    testar_camera_manual,
+    cadastrar_camera_rede,
+    buscar_cameras_usb,
+)
+
 from analise_ambiente import (
     analisar_frame,
     desenhar_objetos
@@ -856,6 +864,7 @@ class CameraSistema:
         self.thread_captura = None
         self.parar_thread = threading.Event()
         self.lock_frame = threading.Lock()
+        self.evento_primeiro_frame = threading.Event()
 
         self.ultimo_frame_em = 0.0
         self.ultima_leitura_ok_em = 0.0
@@ -928,55 +937,111 @@ class CameraSistema:
         return None, None
 
     def _loop_captura_rede(self):
-        while not self.parar_thread.is_set():
-            if self.cap is None or not self.cap.isOpened():
-                cap_novo, frame_inicial = self._abrir_captura_rede()
+        """
+        A thread de rede é a única dona do VideoCapture RTSP/HTTP.
 
-                if cap_novo is None:
-                    self.falhas_consecutivas += 1
-                    time.sleep(self.intervalo_reconexao)
+        Abrir, ler, reconectar e liberar o decoder acontecem sempre
+        nesta mesma thread. Isso evita acesso cruzado ao contexto FFmpeg,
+        que pode causar:
+            Assertion fctx->async_lock failed
+        """
+        try:
+            while not self.parar_thread.is_set():
+
+                if self.cap is None:
+                    cap_novo, frame_inicial = (
+                        self._abrir_captura_rede()
+                    )
+
+                    if self.parar_thread.is_set():
+                        if cap_novo is not None:
+                            try:
+                                cap_novo.release()
+                            except Exception:
+                                pass
+                        break
+
+                    if cap_novo is None:
+                        self.falhas_consecutivas += 1
+                        time.sleep(
+                            self.intervalo_reconexao
+                        )
+                        continue
+
+                    self.cap = cap_novo
+
+                    with self.lock_frame:
+                        self.ultimo_frame = (
+                            frame_inicial.copy()
+                        )
+                        agora = time.time()
+                        self.ultimo_frame_em = agora
+                        self.ultima_leitura_ok_em = agora
+
+                    self.falhas_consecutivas = 0
+                    self.evento_primeiro_frame.set()
+
+                try:
+                    sucesso, frame = self.cap.read()
+                except Exception:
+                    sucesso = False
+                    frame = None
+
+                if (
+                    sucesso
+                    and frame is not None
+                    and frame.size > 0
+                ):
+                    with self.lock_frame:
+                        self.ultimo_frame = frame.copy()
+                        agora = time.time()
+                        self.ultimo_frame_em = agora
+                        self.ultima_leitura_ok_em = agora
+
+                    self.falhas_consecutivas = 0
+                    self.evento_primeiro_frame.set()
                     continue
 
-                self.cap = cap_novo
+                self.falhas_consecutivas += 1
 
-                with self.lock_frame:
-                    self.ultimo_frame = frame_inicial.copy()
-                    agora = time.time()
-                    self.ultimo_frame_em = agora
-                    self.ultima_leitura_ok_em = agora
+                agora = time.time()
+                tempo_sem_frame = (
+                    agora
+                    - self.ultima_leitura_ok_em
+                )
 
-                self.falhas_consecutivas = 0
+                if (
+                    tempo_sem_frame
+                    >= self.tempo_sem_frame_para_reconectar
+                ):
+                    print(
+                        f"⚠️ {self.nome}: stream instavel, "
+                        "tentando reconectar..."
+                    )
 
-            try:
-                sucesso, frame = self.cap.read()
-            except Exception:
-                sucesso = False
-                frame = None
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
 
-            if sucesso and frame is not None and frame.size > 0:
-                with self.lock_frame:
-                    self.ultimo_frame = frame.copy()
-                    agora = time.time()
-                    self.ultimo_frame_em = agora
-                    self.ultima_leitura_ok_em = agora
+                    self.cap = None
 
-                self.falhas_consecutivas = 0
-                continue
+                    time.sleep(
+                        self.intervalo_reconexao
+                    )
+                else:
+                    time.sleep(0.02)
 
-            self.falhas_consecutivas += 1
-            agora = time.time()
-            tempo_sem_frame = agora - self.ultima_leitura_ok_em
-
-            if tempo_sem_frame >= self.tempo_sem_frame_para_reconectar:
-                print(f"⚠️ {self.nome}: stream instavel, tentando reconectar...")
+        finally:
+            # A própria thread que usou o FFmpeg libera o decoder.
+            if self.cap is not None:
                 try:
                     self.cap.release()
                 except Exception:
                     pass
-                self.cap = None
-                time.sleep(self.intervalo_reconexao)
-            else:
-                time.sleep(0.02)
+
+            self.cap = None
+
 
     def abrir(self):
         self.liberar()
@@ -1016,22 +1081,14 @@ class CameraSistema:
             print(f"✅ {self.nome} encontrada (USB)")
             return True
 
-        cap_inicial, frame_inicial = self._abrir_captura_rede()
-
-        if cap_inicial is None:
-            return False
-
-        self.cap = cap_inicial
-
-        with self.lock_frame:
-            self.ultimo_frame = frame_inicial.copy()
-            agora = time.time()
-            self.ultimo_frame_em = agora
-            self.ultima_leitura_ok_em = agora
-
+        # Para rede, o VideoCapture é aberto e lido somente
+        # pela thread de captura. O main nunca toca diretamente
+        # no decoder FFmpeg.
         self.ativa = True
         self.falhas_consecutivas = 0
+        self.cap = None
         self.parar_thread.clear()
+        self.evento_primeiro_frame.clear()
 
         self.thread_captura = threading.Thread(
             target=self._loop_captura_rede,
@@ -1040,7 +1097,32 @@ class CameraSistema:
         )
         self.thread_captura.start()
 
-        print(f"✅ {self.nome} encontrada (WIFI/IP - captura em thread)")
+        timeout_abertura = float(
+            getattr(
+                config,
+                "CAMERA_REDE_TIMEOUT_ABERTURA_SEGUNDOS",
+                35.0,
+            )
+        )
+
+        recebeu_frame = (
+            self.evento_primeiro_frame.wait(
+                timeout=max(
+                    1.0,
+                    timeout_abertura,
+                )
+            )
+        )
+
+        if not recebeu_frame:
+            self.ativa = False
+            self.parar_thread.set()
+            return False
+
+        print(
+            f"✅ {self.nome} encontrada "
+            "(WIFI/IP - captura em thread)"
+        )
         return True
 
     def grab(self):
@@ -1132,7 +1214,25 @@ class CameraSistema:
         self.ativa = False
 
         if self.tipo_rede:
+            # Não chamar cap.release() daqui.
+            # O decoder pertence à thread _loop_captura_rede.
             self.parar_thread.set()
+
+            if (
+                self.thread_captura is not None
+                and self.thread_captura.is_alive()
+                and threading.current_thread()
+                is not self.thread_captura
+            ):
+                try:
+                    self.thread_captura.join(
+                        timeout=2.0
+                    )
+                except Exception:
+                    pass
+
+            self.thread_captura = None
+            return
 
         if self.cap is not None:
             try:
@@ -1142,17 +1242,6 @@ class CameraSistema:
 
         self.cap = None
 
-        if (
-            self.thread_captura is not None
-            and self.thread_captura.is_alive()
-            and threading.current_thread() is not self.thread_captura
-        ):
-            try:
-                self.thread_captura.join(timeout=1.5)
-            except Exception:
-                pass
-
-        self.thread_captura = None
 
 
 # ============================================================
@@ -1199,18 +1288,625 @@ def abrir_cameras_configuradas(
     return cameras
 
 
+
 # ============================================================
-# DESCOBRIR CÂMERAS
+# DESCOBRIR CÂMERAS PARA NOVO AMBIENTE
+#
+# IMPORTANTE:
+# - Perfis existentes continuam abrindo somente as câmeras já
+#   vinculadas ao perfil por camera_uid.
+# - Este fluxo é usado no CLI quando o usuário escolhe
+#   "+ Novo ambiente".
+# - Não depende mais de config.MODO_CAMERAS.
+# - Procura USB E WiFi/IP na mesma execução.
 # ============================================================
+
+def _resposta_sim(
+    mensagem,
+    padrao=False,
+):
+    sufixo = " [S/n]: " if padrao else " [s/N]: "
+    resposta = input(
+        mensagem + sufixo
+    ).strip().lower()
+
+    if not resposta:
+        return bool(padrao)
+
+    return resposta in (
+        "s",
+        "sim",
+        "y",
+        "yes",
+    )
+
+
+def _descobrir_cameras_usb_novo_ambiente():
+    cameras = {}
+
+    try:
+        resultado = buscar_cameras_usb()
+    except Exception as erro:
+        print(
+            f"⚠️ Falha ao enumerar cameras USB: {erro}"
+        )
+        return cameras
+
+    dispositivos = resultado.get(
+        "cameras",
+        []
+    )
+
+    print()
+    print("------------------------------------------")
+    print(" USB")
+    print("------------------------------------------")
+
+    if not dispositivos:
+        print("Nenhuma camera USB encontrada.")
+        return cameras
+
+    for dispositivo in dispositivos:
+        indice = dispositivo.get(
+            "indice"
+        )
+
+        if not isinstance(
+            indice,
+            int
+        ):
+            continue
+
+        nome = (
+            dispositivo.get(
+                "nome_dispositivo"
+            )
+            or f"Camera {indice + 1:02d}"
+        )
+
+        camera = CameraSistema(
+            camera_id=indice,
+            fonte=indice,
+            nome=nome,
+        )
+
+        if camera.abrir():
+            cameras[
+                indice
+            ] = camera
+
+    print(
+        f"Total de cameras USB abertas: "
+        f"{len(cameras)}"
+    )
+
+    return cameras
+
+
+def _candidatos_rede_utilizaveis(
+    candidatos
+):
+    resultado = []
+
+    for candidato in candidatos:
+        if not isinstance(
+            candidato,
+            dict
+        ):
+            continue
+
+        portas = set(
+            candidato.get(
+                "portas",
+                []
+            )
+            or []
+        )
+
+        possui_rtsp = bool(
+            portas.intersection(
+                {
+                    554,
+                    8554,
+                    1935,
+                }
+            )
+        )
+
+        if (
+            possui_rtsp
+            or candidato.get("onvif")
+        ):
+            resultado.append(
+                candidato
+            )
+
+    return resultado
+
+
+def _selecionar_candidatos_rede(
+    candidatos
+):
+    if not candidatos:
+        return []
+
+    print()
+    print(
+        "Candidatos WiFi/IP com perfil de camera:"
+    )
+
+    for indice, candidato in enumerate(
+        candidatos
+    ):
+        portas = ", ".join(
+            str(porta)
+            for porta in candidato.get(
+                "portas",
+                []
+            )
+        ) or "-"
+
+        protocolos = ", ".join(
+            str(item)
+            for item in candidato.get(
+                "protocolos",
+                []
+            )
+        ) or "-"
+
+        print(
+            f"[{indice}] "
+            f"{candidato.get('ip')} "
+            f"| portas: {portas} "
+            f"| {protocolos}"
+        )
+
+    print()
+    print(
+        "Informe os IDs separados por virgula."
+    )
+    print(
+        "ENTER testa todos. "
+        "N ignora cameras WiFi/IP."
+    )
+
+    while True:
+        resposta = input(
+            "Cameras WiFi/IP para testar: "
+        ).strip().lower()
+
+        if resposta in (
+            "n",
+            "nao",
+            "não",
+        ):
+            return []
+
+        if not resposta:
+            return list(
+                candidatos
+            )
+
+        try:
+            ids = {
+                int(parte.strip())
+                for parte in resposta.split(",")
+                if parte.strip()
+            }
+        except ValueError:
+            print(
+                "⚠️ Use IDs numericos separados por virgula."
+            )
+            continue
+
+        invalidos = [
+            indice
+            for indice in ids
+            if not (
+                0
+                <= indice
+                < len(candidatos)
+            )
+        ]
+
+        if invalidos:
+            print(
+                "⚠️ IDs indisponiveis: "
+                + ", ".join(
+                    str(item)
+                    for item in sorted(
+                        invalidos
+                    )
+                )
+            )
+            continue
+
+        return [
+            candidatos[indice]
+            for indice in sorted(ids)
+        ]
+
+
+def _uid_rede_existente_por_fonte(
+    fonte
+):
+    fonte = str(
+        fonte
+        or ""
+    ).strip()
+
+    if not fonte:
+        return None
+
+    try:
+        cameras = (
+            camera_registry.listar_cameras()
+        )
+    except Exception:
+        return None
+
+    for camera in cameras:
+        if not isinstance(
+            camera,
+            dict
+        ):
+            continue
+
+        conexao = (
+            camera.get("conexao")
+            or {}
+        )
+
+        if str(
+            conexao.get("fonte")
+            or ""
+        ).strip() == fonte:
+            return camera.get(
+                "camera_uid"
+            )
+
+    return None
+
+
+def _testar_candidato_rede_interativo(
+    candidato,
+):
+    resultado = (
+        testar_camera_descoberta(
+            candidato
+        )
+    )
+
+    if resultado.get(
+        "sucesso"
+    ):
+        return resultado
+
+    print(
+        f"⚠️ Stream automatico nao encontrado para "
+        f"{candidato.get('ip')}."
+    )
+
+    if _resposta_sim(
+        "Deseja tentar usuario/senha?"
+    ):
+        usuario = input(
+            "Usuario da camera: "
+        ).strip()
+
+        senha = ""
+
+        if usuario:
+            try:
+                import getpass
+
+                senha = getpass.getpass(
+                    "Senha da camera: "
+                )
+            except Exception:
+                senha = input(
+                    "Senha da camera: "
+                )
+
+        resultado = (
+            testar_camera_descoberta(
+                candidato,
+                usuario=usuario or None,
+                senha=senha or None,
+            )
+        )
+
+        if resultado.get(
+            "sucesso"
+        ):
+            return resultado
+
+    print(
+        "Se possuir uma URL RTSP/HTTP conhecida, "
+        "ela pode ser informada manualmente."
+    )
+
+    url_manual = input(
+        "URL do stream "
+        "(ENTER para ignorar): "
+    ).strip()
+
+    if not url_manual:
+        return {
+            "sucesso": False,
+            "erro": (
+                resultado.get("erro")
+                or "STREAM_NAO_DESCOBERTO"
+            ),
+        }
+
+    return testar_camera_manual(
+        url_manual
+    )
+
+
+def _cadastrar_e_abrir_camera_rede(
+    candidato,
+    resultado_teste,
+    camera_id,
+    numero,
+):
+    fonte = resultado_teste.get(
+        "fonte"
+    )
+
+    if not fonte:
+        return None
+
+    nome_padrao = (
+        candidato.get("nome_onvif")
+        or f"Camera WiFi {numero:02d}"
+    )
+
+    nome = input(
+        f"Nome da camera "
+        f"[{nome_padrao}]: "
+    ).strip() or nome_padrao
+
+    camera_uid_existente = (
+        _uid_rede_existente_por_fonte(
+            fonte
+        )
+    )
+
+    cadastro = cadastrar_camera_rede(
+        nome=nome,
+        fonte=fonte,
+        onvif=bool(
+            candidato.get(
+                "onvif"
+            )
+        ),
+        portas_detectadas=list(
+            candidato.get(
+                "portas",
+                []
+            )
+            or []
+        ),
+        camera_uid=(
+            camera_uid_existente
+            or None
+        ),
+    )
+
+    if not cadastro.get(
+        "sucesso"
+    ):
+        print(
+            f"⚠️ Nao foi possivel cadastrar "
+            f"{nome}: "
+            f"{cadastro.get('erro')}"
+        )
+        return None
+
+    dados_camera = (
+        cadastro.get("camera")
+        or {}
+    )
+
+    camera = CameraSistema(
+        camera_id=camera_id,
+        fonte=fonte,
+        nome=nome,
+    )
+
+    camera.camera_uid = (
+        dados_camera.get(
+            "camera_uid"
+        )
+    )
+    camera.status_identidade = (
+        camera_registry.IDENTIFICADA
+    )
+
+    if not camera.abrir():
+        print(
+            f"⚠️ {nome} foi cadastrada, "
+            "mas o stream ficou indisponivel."
+        )
+        return None
+
+    return camera
+
+
+def _descobrir_cameras_rede_novo_ambiente(
+    cameras_existentes,
+):
+    cameras = {}
+
+    print()
+    print("------------------------------------------")
+    print(" WIFI / IP")
+    print("------------------------------------------")
+    print(
+        "Procurando dispositivos na rede local..."
+    )
+
+    try:
+        resultado = buscar_cameras_rede()
+    except Exception as erro:
+        print(
+            f"⚠️ Falha na descoberta WiFi/IP: {erro}"
+        )
+        resultado = {
+            "sucesso": False,
+            "cameras": [],
+        }
+
+    candidatos = (
+        resultado.get(
+            "cameras",
+            []
+        )
+        if resultado.get("sucesso")
+        else []
+    )
+
+    candidatos = (
+        _candidatos_rede_utilizaveis(
+            candidatos
+        )
+    )
+
+    selecionados = (
+        _selecionar_candidatos_rede(
+            candidatos
+        )
+    )
+
+    proximo_id = (
+        max(
+            cameras_existentes.keys(),
+            default=-1,
+        )
+        + 1
+    )
+
+    numero = 1
+
+    for candidato in selecionados:
+        print()
+        print(
+            f"Testando candidato "
+            f"{candidato.get('ip')}..."
+        )
+
+        teste = (
+            _testar_candidato_rede_interativo(
+                candidato
+            )
+        )
+
+        if not teste.get(
+            "sucesso"
+        ):
+            print(
+                f"⚠️ Candidato "
+                f"{candidato.get('ip')} ignorado: "
+                f"{teste.get('erro')}"
+            )
+            continue
+
+        camera = (
+            _cadastrar_e_abrir_camera_rede(
+                candidato=candidato,
+                resultado_teste=teste,
+                camera_id=proximo_id,
+                numero=numero,
+            )
+        )
+
+        if camera is not None:
+            cameras[
+                proximo_id
+            ] = camera
+            proximo_id += 1
+            numero += 1
+
+    if not candidatos:
+        print(
+            "Nenhum candidato WiFi/IP automatico "
+            "com perfil de camera foi encontrado."
+        )
+
+    if not cameras and _resposta_sim(
+        "Deseja informar uma camera de rede manualmente?"
+    ):
+        url = input(
+            "URL RTSP/HTTP: "
+        ).strip()
+
+        if url:
+            teste = testar_camera_manual(
+                url
+            )
+
+            if teste.get(
+                "sucesso"
+            ):
+                candidato_manual = {
+                    "ip": teste.get("ip"),
+                    "portas": (
+                        [teste["porta"]]
+                        if teste.get("porta")
+                        else []
+                    ),
+                    "protocolos": [
+                        str(
+                            teste.get(
+                                "protocolo"
+                            )
+                            or ""
+                        ).upper()
+                    ],
+                    "onvif": False,
+                    "nome_onvif": None,
+                }
+
+                camera = (
+                    _cadastrar_e_abrir_camera_rede(
+                        candidato=candidato_manual,
+                        resultado_teste=teste,
+                        camera_id=proximo_id,
+                        numero=numero,
+                    )
+                )
+
+                if camera is not None:
+                    cameras[
+                        proximo_id
+                    ] = camera
+
+            else:
+                print(
+                    f"⚠️ Stream manual indisponivel: "
+                    f"{teste.get('erro')}"
+                )
+
+    print(
+        f"Total de cameras WiFi/IP abertas: "
+        f"{len(cameras)}"
+    )
+
+    return cameras
+
 
 def descobrir_cameras():
+    """
+    Descoberta combinada para o fluxo CLI de NOVO AMBIENTE.
 
-    modo = getattr(
-        config,
-        "MODO_CAMERAS",
-        "usb"
-    ).lower()
+    O comportamento antigo escolhia USB OU WiFi/IP com base em
+    config.MODO_CAMERAS. Isso fazia uma instalação sem JSON WiFi
+    cair direto em USB e nunca procurar uma câmera nova na rede.
 
+    Agora o fluxo procura as duas categorias na mesma execução.
+    """
     print()
     print(
         "=========================================="
@@ -1221,185 +1917,39 @@ def descobrir_cameras():
     print(
         "=========================================="
     )
-
-    # ========================================================
-    # WIFI / IP TEM PRIORIDADE
-    # ========================================================
-
-    if modo == "wifi":
-
-        print(
-            "Modo configurado: WIFI / IP"
-        )
-
-        print(
-            "Tentando abrir somente as cameras "
-            "salvas em camera_wifi/cameras_wifi.json"
-        )
-
-        configuracoes_wifi = getattr(
-            config,
-            "CAMERAS",
-            {}
-        )
-
-        cameras = abrir_cameras_configuradas(
-            configuracoes_wifi,
-            "wifi"
-        )
-
-        if cameras:
-
-            print(
-                "=========================================="
-            )
-
-            print(
-                f"Total de cameras WiFi/IP abertas: "
-                f"{len(cameras)}"
-            )
-
-            print(
-                "=========================================="
-            )
-            print()
-
-            return cameras
-
-        # ----------------------------------------------------
-        # WIFI EXISTE NO JSON, MAS NENHUMA ABRIU
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "⚠️ Nenhuma camera WiFi/IP configurada "
-            "conseguiu abrir."
-        )
-
-        resposta = input(
-            "Deseja usar cameras USB como fallback? "
-            "[S/n]: "
-        ).strip().lower()
-
-        if resposta not in (
-            "",
-            "s",
-            "sim",
-            "y",
-            "yes"
-        ):
-
-            print()
-            print(
-                "Fallback USB cancelado."
-            )
-            print()
-
-            return {}
-
-        print()
-        print(
-            "Usando fallback USB..."
-        )
-
-        if hasattr(
-            config,
-            "criar_cameras_usb"
-        ):
-
-            configuracoes_usb = (
-                config.criar_cameras_usb()
-            )
-
-        else:
-
-            configuracoes_usb = {
-
-                camera_id: {
-                    "nome":
-                        f"Camera {camera_id + 1:02d}",
-
-                    "fonte":
-                        camera_id,
-
-                    "tipo":
-                        "usb",
-
-                    "ativa":
-                        True,
-                }
-
-                for camera_id in range(
-                    MAX_INDICES_CAMERA
-                )
-            }
-
-        cameras = abrir_cameras_configuradas(
-            configuracoes_usb,
-            "usb"
-        )
-
-        print(
-            "=========================================="
-        )
-
-        print(
-            f"Total de cameras USB encontradas: "
-            f"{len(cameras)}"
-        )
-
-        print(
-            "=========================================="
-        )
-        print()
-
-        return cameras
-
-    # ========================================================
-    # USB PADRÃO
-    # ========================================================
-
     print(
-        "Modo configurado: USB"
+        "Modo de descoberta: USB + WIFI/IP"
     )
 
-    if hasattr(
-        config,
-        "criar_cameras_usb"
-    ):
-
-        configuracoes_usb = (
-            config.criar_cameras_usb()
-        )
-
-    else:
-
-        configuracoes_usb = getattr(
-            config,
-            "CAMERAS",
-            {}
-        )
-
-    cameras = abrir_cameras_configuradas(
-        configuracoes_usb,
-        "usb"
+    cameras = (
+        _descobrir_cameras_usb_novo_ambiente()
     )
 
+    cameras_rede = (
+        _descobrir_cameras_rede_novo_ambiente(
+            cameras
+        )
+    )
+
+    cameras.update(
+        cameras_rede
+    )
+
+    print()
     print(
         "=========================================="
     )
-
     print(
-        f"Total de cameras USB encontradas: "
+        f"Total de cameras abertas: "
         f"{len(cameras)}"
     )
-
     print(
         "=========================================="
     )
     print()
 
     return cameras
+
 # ============================================================
 # CAPTURA SINCRONIZADA
 # ============================================================
@@ -2227,6 +2777,1127 @@ def selecionar_epis():
 
 
 # ============================================================
+# ÁREA DE MONITORAMENTO / ROI — CONFIGURAÇÃO CLI
+# ============================================================
+
+def _normalizar_roi_selecionada(
+    x,
+    y,
+    largura_roi,
+    altura_roi,
+    largura_frame,
+    altura_frame,
+):
+    """
+    Converte uma seleção em pixels para coordenadas normalizadas 0..1.
+    """
+    largura_frame = int(largura_frame)
+    altura_frame = int(altura_frame)
+
+    if largura_frame <= 0 or altura_frame <= 0:
+        return None
+
+    x1 = max(0, int(x))
+    y1 = max(0, int(y))
+    x2 = min(largura_frame, x1 + int(largura_roi))
+    y2 = min(altura_frame, y1 + int(altura_roi))
+
+    if x1 >= x2 or y1 >= y2:
+        return None
+
+    return {
+        "x1": x1 / float(largura_frame),
+        "y1": y1 / float(altura_frame),
+        "x2": x2 / float(largura_frame),
+        "y2": y2 / float(altura_frame),
+    }
+
+
+def _recortar_frame_roi_numpy(
+    frame,
+    roi,
+):
+    """
+    Recorta um frame numpy usando ROI normalizada.
+    """
+    if frame is None or frame.size == 0:
+        return None
+
+    if not isinstance(roi, dict):
+        return None
+
+    altura, largura = frame.shape[:2]
+
+    try:
+        x1 = int(round(float(roi["x1"]) * largura))
+        y1 = int(round(float(roi["y1"]) * altura))
+        x2 = int(round(float(roi["x2"]) * largura))
+        y2 = int(round(float(roi["y2"]) * altura))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    x1 = max(0, min(largura - 1, x1))
+    y1 = max(0, min(altura - 1, y1))
+    x2 = max(1, min(largura, x2))
+    y2 = max(1, min(altura, y2))
+
+    if x1 >= x2 or y1 >= y2:
+        return None
+
+    return frame[
+        y1:y2,
+        x1:x2,
+    ].copy()
+
+
+ROI_MIN_LARGURA_PIXELS = 20
+ROI_MIN_ALTURA_PIXELS = 20
+
+ROI_EXIBICAO_MAX_LARGURA = 900
+ROI_EXIBICAO_MAX_ALTURA = 560
+ROI_ALTURA_BARRA = 78
+
+
+def _ponto_em_caixa(
+    x,
+    y,
+    caixa,
+):
+    if caixa is None:
+        return False
+
+    x1, y1, x2, y2 = caixa
+
+    return (
+        x1 <= int(x) <= x2
+        and
+        y1 <= int(y) <= y2
+    )
+
+
+def _criar_estado_selecao_roi():
+    return {
+        "modo": "SELECAO",
+        "arrastando": False,
+        "inicio": None,
+        "atual": None,
+        "retangulo": None,
+        "acao": None,
+        "altura_imagem": None,
+        "botao_primario": None,
+        "botao_secundario": None,
+        "botao_cancelar": None,
+    }
+
+
+def _retangulo_roi_por_pontos(
+    inicio,
+    fim,
+):
+    if inicio is None or fim is None:
+        return None
+
+    x1 = min(
+        int(inicio[0]),
+        int(fim[0]),
+    )
+    y1 = min(
+        int(inicio[1]),
+        int(fim[1]),
+    )
+    x2 = max(
+        int(inicio[0]),
+        int(fim[0]),
+    )
+    y2 = max(
+        int(inicio[1]),
+        int(fim[1]),
+    )
+
+    largura = x2 - x1
+    altura = y2 - y1
+
+    if (
+        largura < ROI_MIN_LARGURA_PIXELS
+        or altura < ROI_MIN_ALTURA_PIXELS
+    ):
+        return None
+
+    return (
+        x1,
+        y1,
+        largura,
+        altura,
+    )
+
+
+def _preparar_frame_roi_exibicao(
+    frame,
+):
+    """
+    Redimensiona o frame para caber na tela sem depender do
+    redimensionamento automático da janela pelo Windows/OpenCV.
+    """
+    altura, largura = frame.shape[:2]
+
+    escala = min(
+        ROI_EXIBICAO_MAX_LARGURA / max(1, largura),
+        ROI_EXIBICAO_MAX_ALTURA / max(1, altura),
+        1.0,
+    )
+
+    largura_exibicao = max(
+        1,
+        int(round(largura * escala)),
+    )
+    altura_exibicao = max(
+        1,
+        int(round(altura * escala)),
+    )
+
+    if (
+        largura_exibicao == largura
+        and altura_exibicao == altura
+    ):
+        exibicao = frame.copy()
+    else:
+        exibicao = cv2.resize(
+            frame,
+            (
+                largura_exibicao,
+                altura_exibicao,
+            ),
+        )
+
+    return (
+        exibicao,
+        escala,
+    )
+
+
+def _mapear_retangulo_exibicao_para_original(
+    retangulo,
+    escala,
+    largura_original,
+    altura_original,
+):
+    if retangulo is None or escala <= 0:
+        return None
+
+    x, y, largura, altura = retangulo
+
+    x_original = int(round(x / escala))
+    y_original = int(round(y / escala))
+    largura_roi = int(round(largura / escala))
+    altura_roi = int(round(altura / escala))
+
+    x_original = max(
+        0,
+        min(
+            int(largura_original) - 1,
+            x_original,
+        ),
+    )
+    y_original = max(
+        0,
+        min(
+            int(altura_original) - 1,
+            y_original,
+        ),
+    )
+
+    largura_roi = min(
+        largura_roi,
+        int(largura_original) - x_original,
+    )
+    altura_roi = min(
+        altura_roi,
+        int(altura_original) - y_original,
+    )
+
+    if largura_roi <= 0 or altura_roi <= 0:
+        return None
+
+    return (
+        x_original,
+        y_original,
+        largura_roi,
+        altura_roi,
+    )
+
+
+def _desenhar_botao_roi(
+    tela,
+    texto,
+    caixa,
+    ativo=True,
+):
+    x1, y1, x2, y2 = caixa
+
+    cor_fundo = (
+        (55, 105, 55)
+        if ativo
+        else (55, 55, 55)
+    )
+
+    cv2.rectangle(
+        tela,
+        (x1, y1),
+        (x2, y2),
+        cor_fundo,
+        -1,
+    )
+
+    cv2.rectangle(
+        tela,
+        (x1, y1),
+        (x2, y2),
+        (180, 180, 180),
+        1,
+    )
+
+    cv2.putText(
+        tela,
+        texto,
+        (
+            x1 + 10,
+            y1 + 29,
+        ),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.44,
+        (
+            (255, 255, 255)
+            if ativo
+            else (135, 135, 135)
+        ),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _definir_botoes_roi(
+    largura,
+    altura_imagem,
+):
+    margem = 10
+    espaco = 8
+
+    largura_util = (
+        largura
+        - (margem * 2)
+        - (espaco * 2)
+    )
+
+    largura_botao = max(
+        100,
+        largura_util // 3,
+    )
+
+    y1 = altura_imagem + 16
+    y2 = altura_imagem + 62
+
+    primario = (
+        margem,
+        y1,
+        margem + largura_botao,
+        y2,
+    )
+
+    secundario = (
+        margem + largura_botao + espaco,
+        y1,
+        margem + (largura_botao * 2) + espaco,
+        y2,
+    )
+
+    cancelar = (
+        margem + (largura_botao * 2) + (espaco * 2),
+        y1,
+        largura - margem,
+        y2,
+    )
+
+    return (
+        primario,
+        secundario,
+        cancelar,
+    )
+
+
+def _evento_selecao_roi(
+    evento,
+    x,
+    y,
+    flags,
+    parametro,
+):
+    """
+    MODO SELECAO:
+    - clique + segura + arrasta + solta cria apenas o retângulo;
+    - soltar o mouse NUNCA avança automaticamente;
+    - só o botão AMPLIAR SELECAO muda de etapa.
+    """
+    estado = parametro
+
+    if not isinstance(
+        estado,
+        dict,
+    ):
+        return
+
+    if estado.get("modo") != "SELECAO":
+        return
+
+    if evento == cv2.EVENT_LBUTTONDOWN:
+
+        if _ponto_em_caixa(
+            x,
+            y,
+            estado.get("botao_cancelar"),
+        ):
+            estado["acao"] = "cancelar"
+            return
+
+        if _ponto_em_caixa(
+            x,
+            y,
+            estado.get("botao_secundario"),
+        ):
+            estado["arrastando"] = False
+            estado["inicio"] = None
+            estado["atual"] = None
+            estado["retangulo"] = None
+            estado["acao"] = None
+            return
+
+        if _ponto_em_caixa(
+            x,
+            y,
+            estado.get("botao_primario"),
+        ):
+            if estado.get("retangulo") is not None:
+                estado["acao"] = "ampliar"
+            return
+
+        altura_imagem = estado.get(
+            "altura_imagem"
+        )
+
+        if (
+            altura_imagem is not None
+            and int(y) >= int(altura_imagem)
+        ):
+            return
+
+        estado["arrastando"] = True
+        estado["inicio"] = (
+            int(x),
+            int(y),
+        )
+        estado["atual"] = (
+            int(x),
+            int(y),
+        )
+        estado["retangulo"] = None
+        estado["acao"] = None
+        return
+
+    if (
+        evento == cv2.EVENT_MOUSEMOVE
+        and estado.get("arrastando")
+    ):
+        altura_imagem = estado.get(
+            "altura_imagem"
+        )
+
+        y_limitado = int(y)
+
+        if altura_imagem is not None:
+            y_limitado = min(
+                y_limitado,
+                int(altura_imagem) - 1,
+            )
+
+        estado["atual"] = (
+            int(x),
+            y_limitado,
+        )
+        return
+
+    if (
+        evento == cv2.EVENT_LBUTTONUP
+        and estado.get("arrastando")
+    ):
+        estado["arrastando"] = False
+
+        altura_imagem = estado.get(
+            "altura_imagem"
+        )
+
+        y_limitado = int(y)
+
+        if altura_imagem is not None:
+            y_limitado = min(
+                y_limitado,
+                int(altura_imagem) - 1,
+            )
+
+        estado["atual"] = (
+            int(x),
+            y_limitado,
+        )
+
+        estado["retangulo"] = (
+            _retangulo_roi_por_pontos(
+                estado.get("inicio"),
+                estado.get("atual"),
+            )
+        )
+
+        # IMPORTANTE:
+        # nenhuma ação automática após soltar o mouse.
+        estado["acao"] = None
+
+
+def _evento_preview_roi(
+    evento,
+    x,
+    y,
+    flags,
+    parametro,
+):
+    """
+    MODO PREVIEW:
+    o mouse NÃO desenha nova ROI.
+    Ele só aciona:
+    - USAR ESTA AREA
+    - VOLTAR
+    - CANCELAR
+    """
+    if evento != cv2.EVENT_LBUTTONDOWN:
+        return
+
+    estado = parametro
+
+    if estado.get("modo") != "PREVIEW":
+        return
+
+    if _ponto_em_caixa(
+        x,
+        y,
+        estado.get("botao_primario"),
+    ):
+        estado["acao"] = "usar"
+        return
+
+    if _ponto_em_caixa(
+        x,
+        y,
+        estado.get("botao_secundario"),
+    ):
+        estado["acao"] = "voltar"
+        return
+
+    if _ponto_em_caixa(
+        x,
+        y,
+        estado.get("botao_cancelar"),
+    ):
+        estado["acao"] = "cancelar"
+
+
+def _montar_tela_selecao_roi(
+    frame_exibicao,
+    estado,
+):
+    altura, largura = (
+        frame_exibicao.shape[:2]
+    )
+
+    tela = np.zeros(
+        (
+            altura + ROI_ALTURA_BARRA,
+            largura,
+            3,
+        ),
+        dtype=np.uint8,
+    )
+
+    tela[
+        :altura,
+        :largura,
+    ] = frame_exibicao
+
+    inicio = estado.get("inicio")
+    atual = estado.get("atual")
+    retangulo = estado.get("retangulo")
+
+    if (
+        estado.get("arrastando")
+        and inicio is not None
+        and atual is not None
+    ):
+        cv2.rectangle(
+            tela,
+            inicio,
+            atual,
+            (0, 255, 255),
+            2,
+        )
+
+    elif retangulo is not None:
+        x, y, largura_roi, altura_roi = (
+            retangulo
+        )
+
+        cv2.rectangle(
+            tela,
+            (x, y),
+            (
+                x + largura_roi,
+                y + altura_roi,
+            ),
+            (0, 255, 0),
+            2,
+        )
+
+    cv2.rectangle(
+        tela,
+        (0, altura),
+        (
+            largura,
+            altura + ROI_ALTURA_BARRA,
+        ),
+        (25, 25, 25),
+        -1,
+    )
+
+    (
+        botao_primario,
+        botao_secundario,
+        botao_cancelar,
+    ) = _definir_botoes_roi(
+        largura,
+        altura,
+    )
+
+    estado["altura_imagem"] = altura
+    estado["botao_primario"] = botao_primario
+    estado["botao_secundario"] = botao_secundario
+    estado["botao_cancelar"] = botao_cancelar
+
+    _desenhar_botao_roi(
+        tela,
+        "AMPLIAR SELECAO",
+        botao_primario,
+        ativo=(
+            retangulo is not None
+        ),
+    )
+
+    _desenhar_botao_roi(
+        tela,
+        "REFAZER",
+        botao_secundario,
+        ativo=True,
+    )
+
+    _desenhar_botao_roi(
+        tela,
+        "CANCELAR",
+        botao_cancelar,
+        ativo=True,
+    )
+
+    cv2.putText(
+        tela,
+        "1) Clique, segure e arraste.  2) Solte.  3) Clique em AMPLIAR SELECAO.",
+        (14, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.43,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    return tela
+
+
+def _montar_tela_preview_roi(
+    frame_area,
+    estado,
+):
+    exibicao, _ = (
+        _preparar_frame_roi_exibicao(
+            frame_area
+        )
+    )
+
+    altura, largura = (
+        exibicao.shape[:2]
+    )
+
+    tela = np.zeros(
+        (
+            altura + ROI_ALTURA_BARRA,
+            largura,
+            3,
+        ),
+        dtype=np.uint8,
+    )
+
+    tela[
+        :altura,
+        :largura,
+    ] = exibicao
+
+    cv2.rectangle(
+        tela,
+        (0, altura),
+        (
+            largura,
+            altura + ROI_ALTURA_BARRA,
+        ),
+        (25, 25, 25),
+        -1,
+    )
+
+    (
+        botao_primario,
+        botao_secundario,
+        botao_cancelar,
+    ) = _definir_botoes_roi(
+        largura,
+        altura,
+    )
+
+    estado["altura_imagem"] = altura
+    estado["botao_primario"] = botao_primario
+    estado["botao_secundario"] = botao_secundario
+    estado["botao_cancelar"] = botao_cancelar
+
+    _desenhar_botao_roi(
+        tela,
+        "USAR ESTA AREA",
+        botao_primario,
+        ativo=True,
+    )
+
+    _desenhar_botao_roi(
+        tela,
+        "VOLTAR",
+        botao_secundario,
+        ativo=True,
+    )
+
+    _desenhar_botao_roi(
+        tela,
+        "CANCELAR",
+        botao_cancelar,
+        ativo=True,
+    )
+
+    cv2.putText(
+        tela,
+        "PREVIEW DA AREA SELECIONADA - aqui nao existe novo arraste.",
+        (14, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.43,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    return tela
+
+
+def selecionar_area_monitoramento_camera(
+    camera,
+    frame,
+):
+    """
+    Fluxo em UMA janela:
+
+    SELECAO:
+        clicar -> segurar -> arrastar -> soltar
+        -> clicar AMPLIAR SELECAO
+
+    PREVIEW:
+        mostra apenas o recorte
+        -> USAR ESTA AREA
+        -> VOLTAR
+        -> CANCELAR
+
+    Não há avanço automático ao soltar o mouse.
+    """
+    if (
+        frame is None
+        or frame.size == 0
+    ):
+        return None
+
+    altura_original, largura_original = (
+        frame.shape[:2]
+    )
+
+    nome_janela = (
+        f"Configurar Area - {camera.nome}"
+    )
+
+    # Remove a janela geral durante a configuração para não
+    # confundir a tela de monitoramento com a tela de seleção.
+    try:
+        cv2.destroyWindow(
+            getattr(
+                config,
+                "NOME_JANELA",
+                "FIAP x SPI Challenge 2026",
+            )
+        )
+    except Exception:
+        pass
+
+    frame_exibicao, escala = (
+        _preparar_frame_roi_exibicao(
+            frame
+        )
+    )
+
+    estado = (
+        _criar_estado_selecao_roi()
+    )
+
+    cv2.namedWindow(
+        nome_janela,
+        cv2.WINDOW_AUTOSIZE,
+    )
+
+    cv2.setMouseCallback(
+        nome_janela,
+        _evento_selecao_roi,
+        estado,
+    )
+
+    while True:
+
+        # ====================================================
+        # ETAPA 1 - SELEÇÃO
+        # ====================================================
+        estado["modo"] = "SELECAO"
+        estado["acao"] = None
+
+        while True:
+            tela = (
+                _montar_tela_selecao_roi(
+                    frame_exibicao,
+                    estado,
+                )
+            )
+
+            cv2.imshow(
+                nome_janela,
+                tela,
+            )
+
+            cv2.waitKey(20)
+
+            try:
+                visivel = (
+                    cv2.getWindowProperty(
+                        nome_janela,
+                        cv2.WND_PROP_VISIBLE,
+                    )
+                )
+
+                if visivel < 1:
+                    return None
+            except Exception:
+                pass
+
+            acao = estado.get(
+                "acao"
+            )
+
+            if acao == "cancelar":
+                try:
+                    cv2.destroyWindow(
+                        nome_janela
+                    )
+                except Exception:
+                    pass
+                return None
+
+            if acao == "ampliar":
+                if estado.get(
+                    "retangulo"
+                ) is None:
+                    estado["acao"] = None
+                    continue
+                break
+
+        retangulo_original = (
+            _mapear_retangulo_exibicao_para_original(
+                estado["retangulo"],
+                escala,
+                largura_original,
+                altura_original,
+            )
+        )
+
+        if retangulo_original is None:
+            estado["acao"] = None
+            continue
+
+        x, y, largura_roi, altura_roi = (
+            retangulo_original
+        )
+
+        roi = _normalizar_roi_selecionada(
+            x=x,
+            y=y,
+            largura_roi=largura_roi,
+            altura_roi=altura_roi,
+            largura_frame=largura_original,
+            altura_frame=altura_original,
+        )
+
+        frame_area = (
+            _recortar_frame_roi_numpy(
+                frame,
+                roi,
+            )
+        )
+
+        if frame_area is None:
+            estado["acao"] = None
+            continue
+
+        # ====================================================
+        # ETAPA 2 - PREVIEW
+        # ====================================================
+        estado["modo"] = "PREVIEW"
+        estado["acao"] = None
+
+        cv2.setMouseCallback(
+            nome_janela,
+            _evento_preview_roi,
+            estado,
+        )
+
+        while True:
+            tela_preview = (
+                _montar_tela_preview_roi(
+                    frame_area,
+                    estado,
+                )
+            )
+
+            cv2.imshow(
+                nome_janela,
+                tela_preview,
+            )
+
+            cv2.waitKey(20)
+
+            try:
+                visivel = (
+                    cv2.getWindowProperty(
+                        nome_janela,
+                        cv2.WND_PROP_VISIBLE,
+                    )
+                )
+
+                if visivel < 1:
+                    return None
+            except Exception:
+                pass
+
+            acao = estado.get(
+                "acao"
+            )
+
+            if acao == "usar":
+                try:
+                    cv2.destroyWindow(
+                        nome_janela
+                    )
+                except Exception:
+                    pass
+
+                return {
+                    "roi": roi,
+                    "frame_area": frame_area,
+                }
+
+            if acao == "cancelar":
+                try:
+                    cv2.destroyWindow(
+                        nome_janela
+                    )
+                except Exception:
+                    pass
+                return None
+
+            if acao == "voltar":
+                estado["modo"] = "SELECAO"
+                estado["acao"] = None
+                estado["arrastando"] = False
+                estado["inicio"] = None
+                estado["atual"] = None
+                estado["retangulo"] = None
+
+                cv2.setMouseCallback(
+                    nome_janela,
+                    _evento_selecao_roi,
+                    estado,
+                )
+
+                break
+
+
+
+def _frame_configuracao_utilizavel(
+    frame,
+):
+    return (
+        frame is not None
+        and getattr(frame, "size", 0) > 0
+        and bool(np.any(frame))
+    )
+
+
+def _obter_frame_fresco_para_roi(
+    camera,
+    frame_fallback=None,
+    tentativas=30,
+):
+    """
+    Para câmera de rede, retrieve() apenas copia o último frame
+    produzido pela thread; não acessa o decoder FFmpeg.
+    """
+    for _ in range(
+        max(
+            1,
+            int(tentativas),
+        )
+    ):
+        try:
+            if not camera.tipo_rede:
+                camera.grab()
+
+            frame_atual = (
+                camera.retrieve()
+            )
+        except Exception:
+            frame_atual = None
+
+        if _frame_configuracao_utilizavel(
+            frame_atual
+        ):
+            return frame_atual.copy()
+
+        time.sleep(0.03)
+
+    if _frame_configuracao_utilizavel(
+        frame_fallback
+    ):
+        return frame_fallback.copy()
+
+    return None
+
+
+def selecionar_areas_monitoramento(
+    frames_originais,
+):
+    """
+    Solicita a ROI de cada câmera escolhida para o ambiente.
+
+    A ROI é armazenada no perfil_ativo e os frames retornados já são
+    os recortes/zooms que alimentarão a análise de objetos/maquinário.
+    """
+    global perfil_ativo
+
+    if perfil_ativo is None:
+        print(
+            "❌ Nenhum perfil de ambiente ativo para definir a area."
+        )
+        return None
+
+    rois = perfil_ativo.get(
+        "rois"
+    )
+
+    if not isinstance(
+        rois,
+        dict,
+    ):
+        rois = {}
+
+    frames_area = []
+
+    for camera, frame in (
+        frames_originais
+        or []
+    ):
+        frame_selecao = (
+            _obter_frame_fresco_para_roi(
+                camera,
+                frame_fallback=frame,
+            )
+        )
+
+        if frame_selecao is None:
+            print(
+                f"❌ {camera.nome}: nenhum frame valido "
+                "disponivel para selecionar a area."
+            )
+            return None
+
+        resultado = (
+            selecionar_area_monitoramento_camera(
+                camera,
+                frame_selecao,
+            )
+        )
+
+        if resultado is None:
+            return None
+
+        camera_uid = str(
+            camera.camera_uid
+            or ""
+        ).strip()
+
+        if not camera_uid:
+            print(
+                f"❌ {camera.nome}: camera_uid indisponivel "
+                "para salvar a ROI."
+            )
+            return None
+
+        rois[
+            camera_uid
+        ] = resultado[
+            "roi"
+        ]
+
+        frames_area.append(
+            (
+                camera,
+                resultado[
+                    "frame_area"
+                ],
+            )
+        )
+
+    perfil_ativo[
+        "rois"
+    ] = rois
+
+    return frames_area
+
+
+# ============================================================
 # CONFIGURAR AMBIENTE
 # ============================================================
 
@@ -2239,12 +3910,37 @@ def configurar_ambiente(
 
     print()
     print(
-        "Agrupando objetos entre as cameras..."
+        "=========================================="
+    )
+    print(
+        " ETAPA 2 - AREA DE MONITORAMENTO"
+    )
+    print(
+        "=========================================="
+    )
+
+    frames_area = selecionar_areas_monitoramento(
+        frames_originais
+    )
+
+    if frames_area is None:
+        print(
+            "⚠️ Configuracao da area de monitoramento cancelada."
+        )
+        return False
+
+    print()
+    print(
+        "Analisando objetos somente dentro da area selecionada..."
+    )
+
+    analisar_ambiente_cameras(
+        frames_area
     )
 
     objetos_globais = (
         criar_objetos_globais(
-            frames_originais
+            frames_area
         )
     )
 
@@ -3852,26 +5548,91 @@ def criar_referencias_cameras(cameras):
 
     for camera_id, camera in sorted(cameras.items()):
         if camera.tipo_rede:
-            dados_config = getattr(config, "CAMERAS", {}).get(
+            cadastro = None
+
+            if camera.camera_uid:
+                cadastro = camera_registry.obter_camera(
+                    camera.camera_uid
+                )
+
+            configuracoes_legadas = getattr(
+                config,
+                "CAMERAS",
+                {},
+            )
+
+            dados_config = configuracoes_legadas.get(
                 camera_id,
-                {}
+                {},
             )
-            tipo = str(dados_config.get("tipo", "wifi")).lower()
-            cadastro = camera_registry.obter_ou_registrar_rede_selecionada(
-                dados_config=dados_config,
-                nome=camera.nome,
-                config_index_legado=int(camera_id),
+
+            config_index_legado = (
+                int(camera_id)
+                if (
+                    not camera.camera_uid
+                    and camera_id in configuracoes_legadas
+                )
+                else None
             )
-            camera.camera_uid = cadastro["camera_uid"]
-            camera.status_identidade = camera_registry.IDENTIFICADA
-            referencias.append({
-                "camera_uid": cadastro["camera_uid"],
+
+            if cadastro is None:
+                if not dados_config:
+                    dados_config = {
+                        "nome": camera.nome,
+                        "fonte": camera.fonte,
+                        "tipo": (
+                            "rtsp"
+                            if str(camera.fonte).lower().startswith(
+                                "rtsp://"
+                            )
+                            else "http"
+                        ),
+                        "ativa": True,
+                    }
+
+                cadastro = (
+                    camera_registry.obter_ou_registrar_rede_selecionada(
+                        dados_config=dados_config,
+                        nome=camera.nome,
+                        config_index_legado=config_index_legado,
+                    )
+                )
+
+            tipo = str(
+                cadastro.get(
+                    "tipo",
+                    dados_config.get(
+                        "tipo",
+                        "wifi",
+                    ),
+                )
+            ).lower()
+
+            camera.camera_uid = cadastro[
+                "camera_uid"
+            ]
+            camera.status_identidade = (
+                camera_registry.IDENTIFICADA
+            )
+
+            referencia = {
+                "camera_uid": cadastro[
+                    "camera_uid"
+                ],
                 "tipo": tipo,
                 "nome": camera.nome,
-                "referencia_legada": {
-                    "config_index": int(camera_id)
-                },
-            })
+            }
+
+            if config_index_legado is not None:
+                referencia[
+                    "referencia_legada"
+                ] = {
+                    "config_index": config_index_legado
+                }
+
+            referencias.append(
+                referencia
+            )
         else:
             indice = int(camera.fonte)
             cadastro = camera_registry.obter_ou_registrar_usb_selecionada(
@@ -4527,6 +6288,629 @@ def solicitar_nome_novo_ambiente():
         return nome
 
 
+def solicitar_dados_novo_ambiente():
+    """
+    ETAPA 1 - Dados do Ambiente.
+
+    Mantém o fluxo do cadastro aprovado:
+        nome
+        descrição
+        câmeras para monitoramento
+    """
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " ETAPA 1 - DADOS DO AMBIENTE"
+    )
+    print(
+        "=========================================="
+    )
+
+    nome = solicitar_nome_novo_ambiente()
+
+    while True:
+        descricao = input(
+            "Descricao do ambiente "
+            "(ENTER para deixar vazio): "
+        ).strip()
+
+        if len(descricao) <= 500:
+            break
+
+        print(
+            "⚠️ A descricao deve ter no maximo 500 caracteres."
+        )
+
+    return {
+        "nome": nome,
+        "descricao": descricao,
+    }
+
+
+def _descricao_camera_cadastrada(
+    camera,
+):
+    nome = str(
+        camera.get("nome")
+        or "Camera"
+    )
+
+    tipo = str(
+        camera.get("tipo")
+        or ""
+    ).lower()
+
+    if tipo == "usb":
+        return (
+            f"{nome} - USB"
+        )
+
+    conexao = (
+        camera.get("conexao")
+        or {}
+    )
+
+    host = conexao.get("host")
+    porta = conexao.get("porta")
+
+    destino = ""
+
+    if host:
+        destino = str(host)
+
+        if porta is not None:
+            destino += f":{porta}"
+
+    if destino:
+        return (
+            f"{nome} - {tipo.upper()} - {destino}"
+        )
+
+    return (
+        f"{nome} - {tipo.upper() or 'REDE'}"
+    )
+
+
+def selecionar_origem_cameras_novo_ambiente():
+    """
+    Escolha explícita do fluxo de câmeras para um NOVO ambiente.
+
+    1 -> consultar/usar câmeras já cadastradas
+    2 -> buscar/cadastrar nova câmera
+    3 -> cancelar
+    """
+    while True:
+        print()
+        print(
+            "=========================================="
+        )
+        print(
+            " CONFIGURACAO DE CAMERAS"
+        )
+        print(
+            "=========================================="
+        )
+        print(
+            "[1] Consultar cameras cadastradas"
+        )
+        print(
+            "[2] Buscar / cadastrar nova camera"
+        )
+        print(
+            "[3] Cancelar"
+        )
+        print(
+            "=========================================="
+        )
+
+        resposta = input(
+            "Selecione uma opcao: "
+        ).strip()
+
+        if resposta == "1":
+            return "cadastradas"
+
+        if resposta == "2":
+            return "buscar"
+
+        if resposta == "3":
+            return "cancelar"
+
+        print(
+            "⚠️ Opcao invalida."
+        )
+
+
+def selecionar_cameras_cadastradas():
+    """
+    Consulta e seleciona somente câmeras já cadastradas.
+
+    Não inicia descoberta automaticamente.
+    """
+    try:
+        cadastradas = (
+            camera_registry.listar_cameras()
+        )
+    except Exception as erro:
+        print(
+            f"⚠️ Erro lendo cameras cadastradas: {erro}"
+        )
+        cadastradas = []
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        " CAMERAS JA CADASTRADAS"
+    )
+    print(
+        "=========================================="
+    )
+
+    if not cadastradas:
+        print(
+            "Nenhuma camera cadastrada."
+        )
+        return []
+
+    for indice, camera in enumerate(
+        cadastradas
+    ):
+        print(
+            f"[{indice}] "
+            f"{_descricao_camera_cadastrada(camera)}"
+        )
+
+    print()
+    print(
+        "Informe os IDs separados por virgula."
+    )
+    print(
+        "ENTER seleciona todas as cameras cadastradas."
+    )
+
+    while True:
+        resposta = input(
+            "Cameras do ambiente: "
+        ).strip()
+
+        if not resposta:
+            ids = set(
+                range(
+                    len(cadastradas)
+                )
+            )
+            break
+
+        try:
+            ids = {
+                int(parte.strip())
+                for parte in resposta.split(",")
+                if parte.strip()
+            }
+        except ValueError:
+            print(
+                "⚠️ Use apenas IDs numericos separados por virgula."
+            )
+            continue
+
+        invalidos = {
+            item
+            for item in ids
+            if not (
+                0
+                <= item
+                < len(cadastradas)
+            )
+        }
+
+        if invalidos:
+            print(
+                "⚠️ IDs indisponiveis: "
+                + ", ".join(
+                    str(item)
+                    for item in sorted(
+                        invalidos
+                    )
+                )
+            )
+            continue
+
+        if ids:
+            break
+
+        print(
+            "⚠️ Selecione ao menos uma camera."
+        )
+
+    return [
+        cadastradas[indice]
+        for indice in sorted(ids)
+    ]
+
+
+def _texto_pesquisa_camera(
+    camera,
+):
+    conexao = (
+        camera.get("conexao")
+        or {}
+    )
+
+    partes = [
+        camera.get("nome"),
+        camera.get("tipo"),
+        camera.get("camera_uid"),
+        conexao.get("host"),
+        conexao.get("porta"),
+        conexao.get("tipo_stream"),
+        conexao.get("fonte"),
+    ]
+
+    return " ".join(
+        str(item)
+        for item in partes
+        if item is not None
+    ).lower()
+
+
+def filtrar_cameras_cadastradas(
+    cameras,
+    busca=None,
+):
+    termo = str(
+        busca
+        or ""
+    ).strip().lower()
+
+    if not termo:
+        return list(
+            cameras
+            or []
+        )
+
+    return [
+        camera
+        for camera in (
+            cameras
+            or []
+        )
+        if termo
+        in _texto_pesquisa_camera(
+            camera
+        )
+    ]
+
+
+def selecionar_cameras_monitoramento_ambiente():
+    """
+    ETAPA 1 - Câmeras para monitoramento.
+
+    Esta etapa NÃO cadastra nem descobre câmeras.
+    Ela consulta exclusivamente o camera_registry já existente,
+    permite pesquisar e selecionar uma ou mais câmeras para
+    vincular ao novo ambiente.
+    """
+    try:
+        cadastradas = (
+            camera_registry.listar_cameras()
+        )
+    except Exception as erro:
+        print(
+            f"⚠️ Erro lendo cameras cadastradas: {erro}"
+        )
+        cadastradas = []
+
+    if not cadastradas:
+        print()
+        print(
+            "❌ Nenhuma camera cadastrada."
+        )
+        print(
+            "Cadastre uma camera no menu de Cameras "
+            "antes de criar o ambiente."
+        )
+        return []
+
+    while True:
+        print()
+        print(
+            "=========================================="
+        )
+        print(
+            " CAMERAS PARA MONITORAMENTO"
+        )
+        print(
+            "=========================================="
+        )
+
+        busca = input(
+            "Pesquisar camera "
+            "(ENTER mostra todas): "
+        ).strip()
+
+        filtradas = (
+            filtrar_cameras_cadastradas(
+                cadastradas,
+                busca=busca,
+            )
+        )
+
+        if not filtradas:
+            print(
+                "⚠️ Nenhuma camera encontrada para essa pesquisa."
+            )
+            continue
+
+        for indice, camera in enumerate(
+            filtradas
+        ):
+            print(
+                f"[{indice}] "
+                f"{_descricao_camera_cadastrada(camera)}"
+            )
+
+        print()
+        print(
+            "Informe os IDs separados por virgula."
+        )
+        print(
+            "P = pesquisar novamente | C = cancelar"
+        )
+
+        resposta = input(
+            "Cameras selecionadas: "
+        ).strip()
+
+        if resposta.lower() == "p":
+            continue
+
+        if resposta.lower() == "c":
+            return []
+
+        if not resposta:
+            print(
+                "⚠️ Selecione ao menos uma camera."
+            )
+            continue
+
+        try:
+            ids = {
+                int(parte.strip())
+                for parte in resposta.split(",")
+                if parte.strip()
+            }
+        except ValueError:
+            print(
+                "⚠️ Use apenas IDs numericos separados por virgula."
+            )
+            continue
+
+        invalidos = {
+            item
+            for item in ids
+            if not (
+                0
+                <= item
+                < len(filtradas)
+            )
+        }
+
+        if invalidos:
+            print(
+                "⚠️ IDs indisponiveis: "
+                + ", ".join(
+                    str(item)
+                    for item in sorted(
+                        invalidos
+                    )
+                )
+            )
+            continue
+
+        if not ids:
+            print(
+                "⚠️ Selecione ao menos uma camera."
+            )
+            continue
+
+        selecionadas = [
+            filtradas[indice]
+            for indice in sorted(ids)
+        ]
+
+        print()
+        print(
+            "Cameras selecionadas para o ambiente:"
+        )
+
+        for camera in selecionadas:
+            print(
+                " - "
+                + _descricao_camera_cadastrada(
+                    camera
+                )
+            )
+
+        return selecionadas
+
+
+def _abrir_camera_cadastrada(
+    cadastro,
+    camera_id_rede,
+    dispositivos_usb,
+):
+    camera_uid = str(
+        cadastro.get("camera_uid")
+        or ""
+    ).strip()
+
+    nome = str(
+        cadastro.get("nome")
+        or "Camera"
+    )
+
+    tipo = str(
+        cadastro.get("tipo")
+        or ""
+    ).lower()
+
+    if not camera_uid:
+        return None, None
+
+    if tipo == "usb":
+        resolucao = camera_registry.resolver_usb(
+            cadastro,
+            dispositivos=dispositivos_usb,
+        )
+
+        if (
+            resolucao.get(
+                "status_identidade"
+            )
+            != camera_registry.IDENTIFICADA
+        ):
+            print(
+                f"⚠️ {nome}: camera USB cadastrada "
+                "nao foi localizada."
+            )
+            return None, None
+
+        indice = resolucao.get(
+            "indice_runtime"
+        )
+
+        if not isinstance(
+            indice,
+            int,
+        ):
+            return None, None
+
+        camera = CameraSistema(
+            camera_id=indice,
+            fonte=indice,
+            nome=nome,
+        )
+
+        camera.camera_uid = camera_uid
+        camera.status_identidade = (
+            camera_registry.IDENTIFICADA
+        )
+
+        if not camera.abrir():
+            print(
+                f"⚠️ {nome}: cadastrada, mas OFFLINE."
+            )
+            return None, None
+
+        return indice, camera
+
+    conexao = (
+        cadastro.get("conexao")
+        or {}
+    )
+
+    fonte = str(
+        conexao.get("fonte")
+        or ""
+    ).strip()
+
+    if not fonte:
+        print(
+            f"⚠️ {nome}: camera cadastrada sem fonte."
+        )
+        return None, None
+
+    camera = CameraSistema(
+        camera_id=camera_id_rede,
+        fonte=fonte,
+        nome=nome,
+    )
+
+    camera.camera_uid = camera_uid
+    camera.status_identidade = (
+        camera_registry.IDENTIFICADA
+    )
+
+    if not camera.abrir():
+        print(
+            f"⚠️ {nome}: cadastrada, mas OFFLINE."
+        )
+        return None, None
+
+    return (
+        camera_id_rede,
+        camera,
+    )
+
+
+def abrir_cameras_cadastradas_selecionadas(
+    selecionadas,
+):
+    """
+    Abre somente as câmeras que o usuário escolheu.
+
+    Câmeras salvas não são redescobertas nem recadastradas.
+    """
+    cameras = {}
+
+    dispositivos_usb = (
+        camera_registry.enumerar_dispositivos_usb()
+    )
+
+    indices_usb = {
+        item.get("indice")
+        for item in dispositivos_usb
+        if isinstance(
+            item.get("indice"),
+            int,
+        )
+    }
+
+    proximo_id_rede = (
+        max(
+            indices_usb,
+            default=-1,
+        )
+        + 1
+    )
+
+    for cadastro in selecionadas:
+        tipo = str(
+            cadastro.get("tipo")
+            or ""
+        ).lower()
+
+        camera_id, camera = (
+            _abrir_camera_cadastrada(
+                cadastro=cadastro,
+                camera_id_rede=proximo_id_rede,
+                dispositivos_usb=dispositivos_usb,
+            )
+        )
+
+        if camera is None:
+            continue
+
+        while camera_id in cameras:
+            camera_id += 1
+            camera.camera_id = camera_id
+
+        cameras[
+            camera_id
+        ] = camera
+
+        if tipo != "usb":
+            proximo_id_rede = (
+                camera_id + 1
+            )
+
+    return cameras
+
+
 def preparar_startup_ambiente():
     tipo_opcao, perfil = selecionar_ambiente_startup()
 
@@ -4553,83 +6937,237 @@ def preparar_startup_ambiente():
         return cameras
 
     # --------------------------------------------------------
-    # NOVO AMBIENTE OU MIGRAÇÃO DO LEGADO
-    # Reutiliza integralmente a descoberta atual de cameras.
+    # NOVO AMBIENTE
+    #
+    # Fiel ao cadastro aprovado:
+    #
+    # ETAPA 1
+    #   Dados do Ambiente
+    #   -> nome
+    #   -> descrição
+    #   -> pesquisar/listar câmeras já cadastradas
+    #   -> selecionar câmeras para monitoramento
+    #
+    # ETAPA 2
+    #   Área de Monitoramento
+    #
+    # Cadastro/descoberta de câmera NÃO pertence ao cadastro
+    # do ambiente. Isso fica no menu de Câmeras.
     # --------------------------------------------------------
-    cameras_descobertas = descobrir_cameras()
-
-    if not cameras_descobertas:
-        print(
-            "❌ Nenhuma camera disponivel. "
-            "Nao e possivel preparar o ambiente."
-        )
-        return None
-
-    cameras = selecionar_cameras_abertas(
-        cameras_descobertas
-    )
-
-    if not cameras:
-        print("❌ Nenhuma camera foi associada ao ambiente.")
-        return None
-
-    referencias = criar_referencias_cameras(cameras)
-
-    if tipo_opcao == "legado":
-        perfil = ambientes.criar_perfil_legado(
-            config,
-            referencias
+    if tipo_opcao == "novo":
+        dados_ambiente = (
+            solicitar_dados_novo_ambiente()
         )
 
-        if perfil is None:
-            print("❌ Nao foi possivel carregar o ambiente legado.")
-            for camera in cameras.values():
-                camera.liberar()
+        cameras_cadastradas = (
+            selecionar_cameras_monitoramento_ambiente()
+        )
+
+        if not cameras_cadastradas:
+            print(
+                "❌ Nenhuma camera foi selecionada "
+                "para o ambiente."
+            )
             return None
 
-        try:
-            caminho = ambientes.salvar_perfil(perfil)
-        except Exception as erro:
-            print(f"❌ Erro ao migrar ambiente legado: {erro}")
-            for camera in cameras.values():
-                camera.liberar()
-            return None
-
-        print(f"✅ Ambiente legado migrado para: {caminho}")
-        print(
-            "ℹ️ configuracoes/ambiente.json e "
-            "configuracoes/epis.json foram preservados."
+        cameras = (
+            abrir_cameras_cadastradas_selecionadas(
+                cameras_cadastradas
+            )
         )
 
-        ativar_perfil_runtime(perfil)
+        if not cameras:
+            print(
+                "❌ Nenhuma das cameras selecionadas "
+                "conseguiu abrir."
+            )
+            print(
+                "A Area de Monitoramento precisa de "
+                "ao menos uma camera online."
+            )
+            return None
 
-    else:
-        nome = solicitar_nome_novo_ambiente()
+        referencias = (
+            criar_referencias_cameras(
+                cameras
+            )
+        )
+
         perfil = ambientes.criar_perfil(
-            nome=nome,
+            nome=dados_ambiente["nome"],
+            descricao=dados_ambiente["descricao"],
             cameras=referencias,
             epis_obrigatorios=[],
             objetos_globais={},
             calibrado=False,
             origem=ambientes.ORIGEM_NOVO,
         )
-        ativar_perfil_runtime(perfil)
+
+        ativar_perfil_runtime(
+            perfil
+        )
+
+        for camera_id, camera in cameras.items():
+            registrar_camera_esperada(
+                camera_id=camera_id,
+                nome=camera.nome,
+                tipo=(
+                    "wifi"
+                    if camera.tipo_rede
+                    else "usb"
+                ),
+                online=True,
+                camera_uid=camera.camera_uid,
+                status_identidade=(
+                    camera.status_identidade
+                    or camera_registry.IDENTIFICADA
+                ),
+                indice_runtime=(
+                    camera_id
+                    if not camera.tipo_rede
+                    else None
+                ),
+            )
+
+        return cameras
+
+    # --------------------------------------------------------
+    # MIGRAÇÃO DO LEGADO
+    # Mantida separada para não alterar o fluxo histórico.
+    # --------------------------------------------------------
+    origem_cameras = (
+        selecionar_origem_cameras_novo_ambiente()
+    )
+
+    if origem_cameras == "cancelar":
+        print(
+            "Configuracao de cameras cancelada."
+        )
+        return None
+
+    cameras = {}
+
+    if origem_cameras == "cadastradas":
+        cameras_cadastradas = (
+            selecionar_cameras_cadastradas()
+        )
+
+        if cameras_cadastradas:
+            cameras = (
+                abrir_cameras_cadastradas_selecionadas(
+                    cameras_cadastradas
+                )
+            )
+        else:
+            origem_cameras = "buscar"
+
+    if origem_cameras == "buscar":
+        novas = descobrir_cameras()
+
+        for _camera_id, camera in sorted(
+            novas.items()
+        ):
+            novo_id = (
+                max(
+                    cameras.keys(),
+                    default=-1,
+                )
+                + 1
+            )
+
+            while novo_id in cameras:
+                novo_id += 1
+
+            camera.camera_id = novo_id
+            cameras[
+                novo_id
+            ] = camera
+
+    if not cameras:
+        print(
+            "❌ Nenhuma camera disponivel para "
+            "migrar o ambiente legado."
+        )
+        return None
+
+    referencias = (
+        criar_referencias_cameras(
+            cameras
+        )
+    )
+
+    perfil = ambientes.criar_perfil_legado(
+        config,
+        referencias
+    )
+
+    if perfil is None:
+        print(
+            "❌ Nao foi possivel carregar "
+            "o ambiente legado."
+        )
+
+        for camera in cameras.values():
+            camera.liberar()
+
+        return None
+
+    try:
+        caminho = ambientes.salvar_perfil(
+            perfil
+        )
+    except Exception as erro:
+        print(
+            f"❌ Erro ao migrar ambiente legado: {erro}"
+        )
+
+        for camera in cameras.values():
+            camera.liberar()
+
+        return None
+
+    print(
+        f"✅ Ambiente legado migrado para: {caminho}"
+    )
+
+    ativar_perfil_runtime(
+        perfil
+    )
 
     for camera_id, camera in cameras.items():
         registrar_camera_esperada(
             camera_id=camera_id,
             nome=camera.nome,
-            tipo=("wifi" if camera.tipo_rede else "usb"),
+            tipo=(
+                "wifi"
+                if camera.tipo_rede
+                else "usb"
+            ),
             online=True,
             camera_uid=camera.camera_uid,
             status_identidade=(
                 camera.status_identidade
                 or camera_registry.IDENTIFICADA
             ),
-            indice_runtime=(camera_id if not camera.tipo_rede else None),
+            indice_runtime=(
+                camera_id
+                if not camera.tipo_rede
+                else None
+            ),
         )
 
     return cameras
+
+
+def deve_exibir_painel_colaborador():
+    """
+    O painel de operador/EPI/ergonomia só existe no monitoramento.
+    Cadastro e configuração de ambiente não exibem esse painel.
+    """
+    return (
+        estado_sistema.fase_execucao
+        == config.ESTADO_MONITORAMENTO
+    )
 
 
 # ============================================================
@@ -4681,38 +7219,26 @@ def main():
 
                 if frames:
 
-                    nova_analise = (
-                        contador_frames == 1
-                        or contador_frames % INTERVALO_ANALISE_AMBIENTE == 0
-                    )
-
-                    if nova_analise:
-                        frames_visuais = analisar_ambiente_cameras(frames)
-                    else:
-                        frames_visuais = desenhar_objetos_existentes(frames)
+                    # Antes da definição da ROI, apenas exibimos a imagem
+                    # limpa da câmera. Nenhuma detecção de objeto é feita.
+                    frames_visuais = frames
 
                     if (
                         contador_frames >= FRAMES_ANTES_CONFIGURACAO
                         and not configuracao_iniciada
                     ):
 
-                        tem_objeto = any(
-                            camera.total_objetos > 0
-                            for camera in cameras.values()
-                        )
+                        configuracao_iniciada = True
 
-                        if tem_objeto:
-
-                            configuracao_iniciada = True
-
-                            frames_config = capturar_frames_sincronizados(
+                        frames_config = (
+                            capturar_frames_sincronizados(
                                 cameras
                             )
+                        )
 
-                            analisar_ambiente_cameras(
-                                frames_config
-                            )
-
+                        if not frames_config:
+                            configuracao_iniciada = False
+                        else:
                             sucesso = configurar_ambiente(
                                 frames_config
                             )
@@ -4803,21 +7329,28 @@ def main():
 
             if grade is not None:
 
-                painel = criar_painel(
-                    grade.shape[0],
-                    cameras,
-                    status_epis=status_epis,
-                    operador=operador,
-                    severidade=severidade,
-                    status_ergonomia=status_ergonomia,
-                )
-
-                tela = np.hstack(
-                    (
-                        grade,
-                        painel
+                # O painel de colaborador/EPI/ergonomia pertence
+                # exclusivamente ao modo de MONITORAMENTO.
+                # Durante cadastro/configuração de ambiente mostramos
+                # somente as câmeras e as telas próprias de configuração.
+                if deve_exibir_painel_colaborador():
+                    painel = criar_painel(
+                        grade.shape[0],
+                        cameras,
+                        status_epis=status_epis,
+                        operador=operador,
+                        severidade=severidade,
+                        status_ergonomia=status_ergonomia,
                     )
-                )
+
+                    tela = np.hstack(
+                        (
+                            grade,
+                            painel
+                        )
+                    )
+                else:
+                    tela = grade
 
             else:
 

@@ -625,3 +625,58 @@ def obter_ou_registrar_rede_selecionada(
         nome=nome,
         config_index_legado=config_index_legado,
     )
+def atualizar_nome_camera(
+    camera_uid: str,
+    nome: str,
+) -> Optional[Dict[str, Any]]:
+    registry = carregar_registry()
+
+    camera = obter_camera(
+        camera_uid,
+        registry,
+    )
+
+    if camera is None:
+        return None
+
+    nome_normalizado = str(nome or "").strip()
+
+    if not nome_normalizado:
+        raise ValueError("Nome da câmera não pode ser vazio.")
+
+    camera["nome"] = nome_normalizado
+
+    camera.setdefault(
+        "metadata",
+        {},
+    )["atualizado_em"] = _agora_iso()
+
+    salvar_registry(registry)
+
+    return deepcopy(camera)
+
+
+def remover_camera(
+    camera_uid: str,
+) -> bool:
+    registry = carregar_registry()
+
+    cameras = registry.get("cameras", [])
+
+    quantidade_antes = len(cameras)
+
+    registry["cameras"] = [
+        camera
+        for camera in cameras
+        if not (
+            isinstance(camera, dict)
+            and camera.get("camera_uid") == camera_uid
+        )
+    ]
+
+    if len(registry["cameras"]) == quantidade_antes:
+        return False
+
+    salvar_registry(registry)
+
+    return True

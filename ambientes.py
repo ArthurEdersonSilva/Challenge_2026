@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-SCHEMA_VERSION = 2
-SCHEMAS_SUPORTADOS = {1, 2}
+SCHEMA_VERSION = 5
+SCHEMAS_SUPORTADOS = {1, 2, 3, 4, 5}
 PASTA_AMBIENTES = "ambientes"
 ORIGEM_NOVO = "novo"
 ORIGEM_LEGADO = "legado"
@@ -114,6 +114,109 @@ def validar_perfil(perfil: Any) -> Tuple[bool, List[str]]:
     if not isinstance(objetos, dict):
         erros.append("objetos_globais deve ser um objeto")
 
+    # --------------------------------------------------------
+    # SCHEMA 3 — ROI configurável por camera_uid
+    # --------------------------------------------------------
+    if schema_version in {3, 4, 5}:
+        rois = perfil.get("rois")
+
+        if not isinstance(rois, dict):
+            erros.append("rois deve ser um objeto")
+        else:
+            camera_uids_validos = {
+                str(camera.get("camera_uid") or "").strip()
+                for camera in cameras
+                if isinstance(camera, dict)
+                and isinstance(camera.get("camera_uid"), str)
+                and camera.get("camera_uid").strip()
+            }
+
+            for camera_uid_roi, roi in rois.items():
+                try:
+                    uuid.UUID(str(camera_uid_roi))
+                except (ValueError, AttributeError, TypeError):
+                    erros.append(
+                        f"rois[{camera_uid_roi!r}] possui camera_uid inválido"
+                    )
+                    continue
+
+                if str(camera_uid_roi) not in camera_uids_validos:
+                    erros.append(
+                        f"rois[{camera_uid_roi!r}] referencia câmera não vinculada"
+                    )
+
+                if not isinstance(roi, dict):
+                    erros.append(
+                        f"rois[{camera_uid_roi!r}] deve ser um objeto"
+                    )
+                    continue
+
+                coordenadas = {}
+
+                for campo in ("x1", "y1", "x2", "y2"):
+                    valor = roi.get(campo)
+
+                    if not isinstance(valor, (int, float)):
+                        erros.append(
+                            f"rois[{camera_uid_roi!r}].{campo} inválido"
+                        )
+                        continue
+
+                    valor_float = float(valor)
+                    coordenadas[campo] = valor_float
+
+                    if not (0.0 <= valor_float <= 1.0):
+                        erros.append(
+                            f"rois[{camera_uid_roi!r}].{campo} "
+                            "deve estar entre 0 e 1"
+                        )
+
+                if all(
+                    campo in coordenadas
+                    for campo in ("x1", "y1", "x2", "y2")
+                ):
+                    if coordenadas["x1"] >= coordenadas["x2"]:
+                        erros.append(
+                            f"rois[{camera_uid_roi!r}] exige x1 < x2"
+                        )
+
+                    if coordenadas["y1"] >= coordenadas["y2"]:
+                        erros.append(
+                            f"rois[{camera_uid_roi!r}] exige y1 < y2"
+                        )
+
+    if schema_version in {4, 5}:
+        colaboradores = perfil.get("colaboradores_vinculados")
+
+        if not isinstance(colaboradores, list):
+            erros.append("colaboradores_vinculados deve ser uma lista")
+        else:
+            matriculas_vistas = set()
+
+            for indice, matricula in enumerate(colaboradores):
+                if not isinstance(matricula, str) or not matricula.strip():
+                    erros.append(
+                        f"colaboradores_vinculados[{indice}] inválido"
+                    )
+                    continue
+
+                matricula_normalizada = matricula.strip()
+
+                if matricula_normalizada in matriculas_vistas:
+                    erros.append(
+                        f"colaboradores_vinculados[{indice}] duplicado"
+                    )
+                    continue
+
+                matriculas_vistas.add(matricula_normalizada)
+
+    if schema_version == 5:
+        descricao = perfil.get("descricao", "")
+        if not isinstance(descricao, str):
+            erros.append("descricao deve ser texto")
+        elif len(descricao) > 500:
+            erros.append("descricao deve ter no máximo 500 caracteres")
+
     metadata = perfil.get("metadata")
     if not isinstance(metadata, dict):
         erros.append("metadata deve ser um objeto")
@@ -126,9 +229,12 @@ def criar_perfil(
     cameras: List[Dict[str, Any]],
     epis_obrigatorios: Optional[List[str]] = None,
     objetos_globais: Optional[Dict[str, Dict[str, Any]]] = None,
+    rois: Optional[Dict[str, Dict[str, float]]] = None,
+    colaboradores_vinculados: Optional[List[str]] = None,
     calibrado: bool = False,
     origem: str = ORIGEM_NOVO,
     ambiente_id: Optional[str] = None,
+    descricao: str = "",
 ) -> Dict[str, Any]:
     agora = _agora_iso()
 
@@ -136,10 +242,15 @@ def criar_perfil(
         "schema_version": SCHEMA_VERSION,
         "ambiente_id": ambiente_id or gerar_ambiente_id(),
         "nome": nome.strip(),
+        "descricao": str(descricao or "").strip(),
         "calibrado": bool(calibrado),
         "cameras": deepcopy(cameras or []),
         "epis_obrigatorios": list(epis_obrigatorios or []),
         "objetos_globais": deepcopy(objetos_globais or {}),
+        "rois": deepcopy(rois or {}),
+        "colaboradores_vinculados": list(
+            colaboradores_vinculados or []
+        ),
         "metadata": {
             "criado_em": agora,
             "atualizado_em": agora,
@@ -236,6 +347,9 @@ def persistir_camera_uid(
     # A referência legada pode continuar no JSON para diagnóstico, mas
     # camera_uid passa a ser a referência persistente principal.
     perfil["schema_version"] = SCHEMA_VERSION
+    perfil.setdefault("descricao", "")
+    perfil.setdefault("rois", {})
+    perfil.setdefault("colaboradores_vinculados", [])
     return salvar_perfil(perfil)
 
 
@@ -359,3 +473,24 @@ def criar_perfil_legado(
     perfil["metadata"]["migrado_em"] = _agora_iso()
 
     return perfil
+def remover_perfil(
+    ambiente_id: str,
+) -> bool:
+    ambiente_id = str(ambiente_id or "").strip()
+
+    if not ambiente_id:
+        return False
+
+    try:
+        uuid.UUID(ambiente_id)
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+    caminho = caminho_perfil(ambiente_id)
+
+    if not os.path.exists(caminho):
+        return False
+
+    os.remove(caminho)
+
+    return True

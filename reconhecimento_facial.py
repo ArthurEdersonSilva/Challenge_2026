@@ -49,6 +49,67 @@ def _carregar_deepface():
         raise DeepFaceIndisponivel(str(erro)) from erro
 
 
+
+def _confirmar_multiplos_com_retinaface(
+    imagem,
+    rostos,
+    confianca_minima: float,
+    dimensao_minima: int,
+):
+    """
+    Quando o detector principal retorna múltiplos rostos, usa RetinaFace
+    somente como confirmação secundária.
+
+    Se RetinaFace encontrar exatamente um rosto utilizável, esse único rosto
+    confirmado é usado para a validação. Caso contrário, o resultado original
+    com múltiplos rostos é preservado.
+    """
+    if len(rostos) <= 1:
+        return rostos
+
+    try:
+        DeepFace = _carregar_deepface()
+
+        confirmacoes = DeepFace.extract_faces(
+            img_path=imagem,
+            detector_backend="retinaface",
+            enforce_detection=True,
+            align=True,
+        )
+
+        validas = []
+
+        for rosto in confirmacoes or []:
+            face = rosto.get("face")
+            confianca = float(
+                rosto.get("confidence", 1.0) or 0.0
+            )
+
+            if face is None or getattr(face, "size", 0) == 0:
+                continue
+
+            altura, largura = face.shape[:2]
+
+            if (
+                largura < int(dimensao_minima)
+                or altura < int(dimensao_minima)
+            ):
+                continue
+
+            if confianca < float(confianca_minima):
+                continue
+
+            validas.append(rosto)
+
+        if len(validas) == 1:
+            return validas
+
+    except Exception:
+        pass
+
+    return rostos
+
+
 def _rostos_utilizaveis(
     imagem,
     detector_backend: str,
@@ -77,6 +138,19 @@ def _rostos_utilizaveis(
             continue
         utilizaveis.append(rosto)
         confiancas.append(confianca)
+
+    if len(utilizaveis) > 1:
+        utilizaveis = _confirmar_multiplos_com_retinaface(
+            imagem=imagem,
+            rostos=utilizaveis,
+            confianca_minima=confianca_minima,
+            dimensao_minima=dimensao_minima,
+        )
+        confiancas = [
+            float(rosto.get("confidence", 1.0) or 0.0)
+            for rosto in utilizaveis
+        ]
+
     return utilizaveis, confiancas
 
 
