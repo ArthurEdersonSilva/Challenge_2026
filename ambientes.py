@@ -7,9 +7,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-SCHEMA_VERSION = 5
-SCHEMAS_SUPORTADOS = {1, 2, 3, 4, 5}
-PASTA_AMBIENTES = "ambientes"
+SCHEMA_VERSION = 6
+SCHEMAS_SUPORTADOS = {1, 2, 3, 4, 5, 6}
+
+RAIZ_PROJETO = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+PASTA_AMBIENTES = os.path.join(
+    RAIZ_PROJETO,
+    "ambientes",
+)
 ORIGEM_NOVO = "novo"
 ORIGEM_LEGADO = "legado"
 
@@ -117,7 +125,7 @@ def validar_perfil(perfil: Any) -> Tuple[bool, List[str]]:
     # --------------------------------------------------------
     # SCHEMA 3 — ROI configurável por camera_uid
     # --------------------------------------------------------
-    if schema_version in {3, 4, 5}:
+    if schema_version in {3, 4, 5, 6}:
         rois = perfil.get("rois")
 
         if not isinstance(rois, dict):
@@ -185,7 +193,7 @@ def validar_perfil(perfil: Any) -> Tuple[bool, List[str]]:
                             f"rois[{camera_uid_roi!r}] exige y1 < y2"
                         )
 
-    if schema_version in {4, 5}:
+    if schema_version in {4, 5, 6}:
         colaboradores = perfil.get("colaboradores_vinculados")
 
         if not isinstance(colaboradores, list):
@@ -210,12 +218,26 @@ def validar_perfil(perfil: Any) -> Tuple[bool, List[str]]:
 
                 matriculas_vistas.add(matricula_normalizada)
 
-    if schema_version == 5:
+    if schema_version in {5, 6}:
         descricao = perfil.get("descricao", "")
         if not isinstance(descricao, str):
             erros.append("descricao deve ser texto")
         elif len(descricao) > 500:
             erros.append("descricao deve ter no máximo 500 caracteres")
+
+    if schema_version == 6:
+        foto_ambiente = perfil.get(
+            "foto_ambiente",
+            "",
+        )
+
+        if not isinstance(
+            foto_ambiente,
+            str,
+        ):
+            erros.append(
+                "foto_ambiente deve ser texto"
+            )
 
     metadata = perfil.get("metadata")
     if not isinstance(metadata, dict):
@@ -235,6 +257,7 @@ def criar_perfil(
     origem: str = ORIGEM_NOVO,
     ambiente_id: Optional[str] = None,
     descricao: str = "",
+    foto_ambiente: str = "",
 ) -> Dict[str, Any]:
     agora = _agora_iso()
 
@@ -243,6 +266,9 @@ def criar_perfil(
         "ambiente_id": ambiente_id or gerar_ambiente_id(),
         "nome": nome.strip(),
         "descricao": str(descricao or "").strip(),
+        "foto_ambiente": str(
+            foto_ambiente or ""
+        ).strip(),
         "calibrado": bool(calibrado),
         "cameras": deepcopy(cameras or []),
         "epis_obrigatorios": list(epis_obrigatorios or []),
@@ -263,6 +289,28 @@ def salvar_perfil(perfil: Dict[str, Any]) -> str:
     garantir_pasta_ambientes()
 
     perfil_salvar = deepcopy(perfil)
+
+    if (
+        perfil_salvar.get("schema_version")
+        == SCHEMA_VERSION
+    ):
+        perfil_salvar.setdefault(
+            "descricao",
+            "",
+        )
+        perfil_salvar.setdefault(
+            "rois",
+            {},
+        )
+        perfil_salvar.setdefault(
+            "colaboradores_vinculados",
+            [],
+        )
+        perfil_salvar.setdefault(
+            "foto_ambiente",
+            "",
+        )
+
     metadata = perfil_salvar.setdefault("metadata", {})
     metadata.setdefault("criado_em", _agora_iso())
     metadata.setdefault("origem", ORIGEM_NOVO)
@@ -350,6 +398,7 @@ def persistir_camera_uid(
     perfil.setdefault("descricao", "")
     perfil.setdefault("rois", {})
     perfil.setdefault("colaboradores_vinculados", [])
+    perfil.setdefault("foto_ambiente", "")
     return salvar_perfil(perfil)
 
 

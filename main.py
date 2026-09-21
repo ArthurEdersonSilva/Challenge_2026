@@ -1,6 +1,7 @@
 import cv2
 import math
 import os
+import ctypes
 import threading
 import time
 import numpy as np
@@ -75,6 +76,43 @@ from reconhecimento_facial import ReconhecedorFacial
 
 from gestao_incidentes_epi import GestorIncidentesEPI
 from gestao_notificacoes_incidentes import GestorNotificacoesIncidentes
+
+
+# ============================================================
+# DPI / MOUSE DO OPENCV NO WINDOWS
+# ============================================================
+
+def _configurar_dpi_opencv_windows():
+    """
+    Evita desencontro entre a posição visual do mouse e as coordenadas
+    recebidas pelo OpenCV quando o Windows usa escala de 125%, 150% etc.
+    """
+    if os.name != "nt":
+        return
+
+    try:
+        # Windows 10/11: Per-Monitor DPI Aware V2.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(
+            ctypes.c_void_p(-4)
+        )
+        return
+    except Exception:
+        pass
+
+    try:
+        # Fallback para versões anteriores do Windows.
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+_configurar_dpi_opencv_windows()
 
 
 # ============================================================
@@ -2875,20 +2913,29 @@ def _ponto_em_caixa(
     )
 
 
+
 def _criar_estado_selecao_roi():
     return {
         "modo": "SELECAO",
+
+        # NOVO:
+        # A imagem abre travada. O usuário precisa clicar primeiro em
+        # SELECIONAR AREA. Só depois o mouse pode começar a desenhar.
+        "selecao_armada": False,
+
         "arrastando": False,
         "inicio": None,
         "atual": None,
         "retangulo": None,
         "acao": None,
+
         "altura_imagem": None,
+        "largura_imagem": None,
+
         "botao_primario": None,
         "botao_secundario": None,
         "botao_cancelar": None,
     }
-
 
 def _retangulo_roi_por_pontos(
     inicio,
@@ -3124,6 +3171,7 @@ def _definir_botoes_roi(
     )
 
 
+
 def _evento_selecao_roi(
     evento,
     x,
@@ -3132,132 +3180,236 @@ def _evento_selecao_roi(
     parametro,
 ):
     """
-    MODO SELECAO:
-    - clique + segura + arrasta + solta cria apenas o retângulo;
-    - soltar o mouse NUNCA avança automaticamente;
-    - só o botão AMPLIAR SELECAO muda de etapa.
+    Seleção de ROI totalmente manual.
+
+    ESTADO INICIAL:
+        - imagem congelada;
+        - nenhum clique na imagem desenha;
+        - usuário precisa clicar em SELECIONAR AREA.
+
+    DEPOIS:
+        - clicar, segurar e arrastar sobre a imagem;
+        - soltar apenas finaliza o retângulo;
+        - nada avança automaticamente.
+
+    APÓS DESENHAR:
+        - AMPLIAR SELECAO avança;
+        - REFAZER limpa e volta ao estado inicial;
+        - CANCELAR encerra.
     """
     estado = parametro
 
-    if not isinstance(
-        estado,
-        dict,
-    ):
+    if not isinstance(estado, dict):
         return
 
     if estado.get("modo") != "SELECAO":
         return
 
+    x = int(x)
+    y = int(y)
+
     if evento == cv2.EVENT_LBUTTONDOWN:
 
+        # ----------------------------------------------------
+        # CANCELAR
+        # ----------------------------------------------------
         if _ponto_em_caixa(
             x,
             y,
             estado.get("botao_cancelar"),
         ):
+            estado["selecao_armada"] = False
+            estado["arrastando"] = False
             estado["acao"] = "cancelar"
             return
 
+        # ----------------------------------------------------
+        # REFAZER
+        # Só tem efeito se já existe alguma interação/seleção.
+        # ----------------------------------------------------
         if _ponto_em_caixa(
             x,
             y,
             estado.get("botao_secundario"),
         ):
-            estado["arrastando"] = False
-            estado["inicio"] = None
-            estado["atual"] = None
-            estado["retangulo"] = None
-            estado["acao"] = None
+            if (
+                estado.get("retangulo") is not None
+                or estado.get("selecao_armada")
+                or estado.get("arrastando")
+            ):
+                estado["selecao_armada"] = False
+                estado["arrastando"] = False
+                estado["inicio"] = None
+                estado["atual"] = None
+                estado["retangulo"] = None
+                estado["acao"] = "refazer"
             return
 
+        # ----------------------------------------------------
+        # BOTÃO PRINCIPAL
+        #
+        # Sem ROI:
+        #   SELECIONAR AREA -> arma o desenho.
+        #
+        # Com ROI:
+        #   AMPLIAR SELECAO -> avança para preview.
+        # ----------------------------------------------------
         if _ponto_em_caixa(
             x,
             y,
             estado.get("botao_primario"),
         ):
+            estado["arrastando"] = False
+
             if estado.get("retangulo") is not None:
                 estado["acao"] = "ampliar"
+                return
+
+            if not estado.get("selecao_armada"):
+                estado["selecao_armada"] = True
+                estado["inicio"] = None
+                estado["atual"] = None
+                estado["retangulo"] = None
+                estado["acao"] = None
+
             return
 
-        altura_imagem = estado.get(
-            "altura_imagem"
-        )
+        # ----------------------------------------------------
+        # IMAGEM
+        #
+        # IMPORTANTE:
+        # enquanto SELECIONAR AREA não tiver sido clicado,
+        # qualquer clique na imagem é ignorado.
+        # ----------------------------------------------------
+        if not estado.get("selecao_armada"):
+            return
 
-        if (
-            altura_imagem is not None
-            and int(y) >= int(altura_imagem)
+        altura_imagem = estado.get("altura_imagem")
+        largura_imagem = estado.get("largura_imagem")
+
+        if altura_imagem is None or largura_imagem is None:
+            return
+
+        if not (
+            0 <= x < int(largura_imagem)
+            and 0 <= y < int(altura_imagem)
         ):
             return
 
         estado["arrastando"] = True
-        estado["inicio"] = (
-            int(x),
-            int(y),
-        )
-        estado["atual"] = (
-            int(x),
-            int(y),
-        )
+        estado["inicio"] = (x, y)
+        estado["atual"] = (x, y)
         estado["retangulo"] = None
         estado["acao"] = None
         return
 
+    # --------------------------------------------------------
+    # ARRASTAR
+    # --------------------------------------------------------
     if (
         evento == cv2.EVENT_MOUSEMOVE
         and estado.get("arrastando")
     ):
-        altura_imagem = estado.get(
-            "altura_imagem"
+        if not estado.get("selecao_armada"):
+            estado["arrastando"] = False
+            return
+
+        # Só acompanha o mouse enquanto o botão esquerdo
+        # estiver realmente pressionado.
+        if not (flags & cv2.EVENT_FLAG_LBUTTON):
+            estado["arrastando"] = False
+            estado["inicio"] = None
+            estado["atual"] = None
+            estado["retangulo"] = None
+            return
+
+        altura_imagem = int(
+            estado.get("altura_imagem") or 1
+        )
+        largura_imagem = int(
+            estado.get("largura_imagem") or 1
         )
 
-        y_limitado = int(y)
+        x_limitado = max(
+            0,
+            min(
+                x,
+                largura_imagem - 1,
+            ),
+        )
 
-        if altura_imagem is not None:
-            y_limitado = min(
-                y_limitado,
-                int(altura_imagem) - 1,
-            )
+        y_limitado = max(
+            0,
+            min(
+                y,
+                altura_imagem - 1,
+            ),
+        )
 
         estado["atual"] = (
-            int(x),
+            x_limitado,
             y_limitado,
         )
         return
 
-    if (
-        evento == cv2.EVENT_LBUTTONUP
-        and estado.get("arrastando")
-    ):
+    # --------------------------------------------------------
+    # SOLTAR
+    # --------------------------------------------------------
+    if evento == cv2.EVENT_LBUTTONUP:
+
+        if not estado.get("arrastando"):
+            return
+
         estado["arrastando"] = False
 
-        altura_imagem = estado.get(
-            "altura_imagem"
+        altura_imagem = int(
+            estado.get("altura_imagem") or 1
+        )
+        largura_imagem = int(
+            estado.get("largura_imagem") or 1
         )
 
-        y_limitado = int(y)
+        x_limitado = max(
+            0,
+            min(
+                x,
+                largura_imagem - 1,
+            ),
+        )
 
-        if altura_imagem is not None:
-            y_limitado = min(
-                y_limitado,
-                int(altura_imagem) - 1,
-            )
+        y_limitado = max(
+            0,
+            min(
+                y,
+                altura_imagem - 1,
+            ),
+        )
 
         estado["atual"] = (
-            int(x),
+            x_limitado,
             y_limitado,
         )
 
-        estado["retangulo"] = (
-            _retangulo_roi_por_pontos(
-                estado.get("inicio"),
-                estado.get("atual"),
-            )
+        retangulo = _retangulo_roi_por_pontos(
+            estado.get("inicio"),
+            estado.get("atual"),
         )
 
-        # IMPORTANTE:
-        # nenhuma ação automática após soltar o mouse.
-        estado["acao"] = None
+        estado["retangulo"] = retangulo
 
+        if retangulo is not None:
+            # Seleção terminou.
+            # A imagem fica parada aguardando AMPLIAR ou REFAZER.
+            estado["selecao_armada"] = False
+        else:
+            # Seleção pequena/inválida.
+            # Continua armado para o usuário tentar de novo.
+            estado["inicio"] = None
+            estado["atual"] = None
+            estado["selecao_armada"] = True
+
+        # NUNCA avançar automaticamente.
+        estado["acao"] = None
 
 def _evento_preview_roi(
     evento,
@@ -3306,6 +3458,7 @@ def _evento_preview_roi(
         estado["acao"] = "cancelar"
 
 
+
 def _montar_tela_selecao_roi(
     frame_exibicao,
     estado,
@@ -3332,6 +3485,9 @@ def _montar_tela_selecao_roi(
     atual = estado.get("atual")
     retangulo = estado.get("retangulo")
 
+    # --------------------------------------------------------
+    # DESENHO DA ROI
+    # --------------------------------------------------------
     if (
         estado.get("arrastando")
         and inicio is not None
@@ -3361,6 +3517,9 @@ def _montar_tela_selecao_roi(
             2,
         )
 
+    # --------------------------------------------------------
+    # BARRA INFERIOR
+    # --------------------------------------------------------
     cv2.rectangle(
         tela,
         (0, altura),
@@ -3382,24 +3541,51 @@ def _montar_tela_selecao_roi(
     )
 
     estado["altura_imagem"] = altura
+    estado["largura_imagem"] = largura
     estado["botao_primario"] = botao_primario
     estado["botao_secundario"] = botao_secundario
     estado["botao_cancelar"] = botao_cancelar
 
-    _desenhar_botao_roi(
-        tela,
-        "AMPLIAR SELECAO",
-        botao_primario,
-        ativo=(
-            retangulo is not None
-        ),
+    tem_roi = retangulo is not None
+    armado = bool(
+        estado.get("selecao_armada")
     )
 
+    # --------------------------------------------------------
+    # BOTÃO PRINCIPAL
+    # --------------------------------------------------------
+    if tem_roi:
+        texto_primario = "AMPLIAR SELECAO"
+        primario_ativo = True
+    elif armado:
+        texto_primario = "DESENHE NA IMAGEM"
+        primario_ativo = False
+    else:
+        texto_primario = "SELECIONAR AREA"
+        primario_ativo = True
+
+    _desenhar_botao_roi(
+        tela,
+        texto_primario,
+        botao_primario,
+        ativo=primario_ativo,
+    )
+
+    # --------------------------------------------------------
+    # REFAZER
+    # Só fica ativo quando existe algo para limpar.
+    # --------------------------------------------------------
     _desenhar_botao_roi(
         tela,
         "REFAZER",
         botao_secundario,
-        ativo=True,
+        ativo=(
+            tem_roi
+            or armado
+            or bool(
+                estado.get("arrastando")
+            )
+        ),
     )
 
     _desenhar_botao_roi(
@@ -3409,19 +3595,37 @@ def _montar_tela_selecao_roi(
         ativo=True,
     )
 
+    # --------------------------------------------------------
+    # INSTRUÇÃO DE ESTADO
+    # --------------------------------------------------------
+    if tem_roi:
+        instrucao = (
+            "Area marcada. Clique em AMPLIAR SELECAO "
+            "ou REFAZER."
+        )
+    elif armado:
+        instrucao = (
+            "Clique, segure e arraste sobre a imagem. "
+            "Solte para concluir."
+        )
+    else:
+        instrucao = (
+            "Imagem parada. Clique em SELECIONAR AREA "
+            "para comecar."
+        )
+
     cv2.putText(
         tela,
-        "1) Clique, segure e arraste.  2) Solte.  3) Clique em AMPLIAR SELECAO.",
+        instrucao,
         (14, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
+        0.40,
         (255, 255, 255),
         1,
         cv2.LINE_AA,
     )
 
     return tela
-
 
 def _montar_tela_preview_roi(
     frame_area,
@@ -3472,6 +3676,7 @@ def _montar_tela_preview_roi(
     )
 
     estado["altura_imagem"] = altura
+    estado["largura_imagem"] = largura
     estado["botao_primario"] = botao_primario
     estado["botao_secundario"] = botao_secundario
     estado["botao_cancelar"] = botao_cancelar
@@ -3599,7 +3804,39 @@ def selecionar_area_monitoramento_camera(
                 tela,
             )
 
-            cv2.waitKey(20)
+            tecla = cv2.waitKey(20) & 0xFF
+
+            if tecla in (27, ord("q")):
+                estado["acao"] = "cancelar"
+
+            elif tecla == ord("r"):
+                if (
+                    estado.get("retangulo") is not None
+                    or estado.get("selecao_armada")
+                    or estado.get("arrastando")
+                ):
+                    estado["selecao_armada"] = False
+                    estado["arrastando"] = False
+                    estado["inicio"] = None
+                    estado["atual"] = None
+                    estado["retangulo"] = None
+                    estado["acao"] = "refazer"
+
+            elif tecla == ord("s"):
+                if (
+                    estado.get("retangulo") is None
+                    and not estado.get("selecao_armada")
+                ):
+                    estado["selecao_armada"] = True
+                    estado["inicio"] = None
+                    estado["atual"] = None
+                    estado["acao"] = None
+
+            elif (
+                tecla in (13, 10)
+                and estado.get("retangulo") is not None
+            ):
+                estado["acao"] = "ampliar"
 
             try:
                 visivel = (
@@ -3626,6 +3863,10 @@ def selecionar_area_monitoramento_camera(
                 except Exception:
                     pass
                 return None
+
+            if acao == "refazer":
+                estado["acao"] = None
+                continue
 
             if acao == "ampliar":
                 if estado.get(
@@ -3697,7 +3938,14 @@ def selecionar_area_monitoramento_camera(
                 tela_preview,
             )
 
-            cv2.waitKey(20)
+            tecla = cv2.waitKey(20) & 0xFF
+
+            if tecla in (27, ord("q")):
+                estado["acao"] = "cancelar"
+            elif tecla in (ord("v"), 8):
+                estado["acao"] = "voltar"
+            elif tecla in (13, 10):
+                estado["acao"] = "usar"
 
             try:
                 visivel = (
@@ -3741,6 +3989,7 @@ def selecionar_area_monitoramento_camera(
             if acao == "voltar":
                 estado["modo"] = "SELECAO"
                 estado["acao"] = None
+                estado["selecao_armada"] = False
                 estado["arrastando"] = False
                 estado["inicio"] = None
                 estado["atual"] = None
@@ -6585,6 +6834,88 @@ def filtrar_cameras_cadastradas(
     ]
 
 
+
+def _sincronizar_cameras_wifi_configuradas_com_registry():
+    """
+    Compatibilidade entre o cadastro WiFi legado e o camera_registry.
+
+    O config.py ainda carrega camera_wifi/cameras_wifi.json em config.CAMERAS.
+    O fluxo novo de Cadastro de Ambiente consulta camera_registry.
+
+    Esta sincronizacao garante que uma camera WiFi/IP ja configurada no
+    arquivo legado passe a existir tambem no registry, preservando o mesmo
+    camera_uid nas execucoes seguintes.
+    """
+    modo = str(
+        getattr(
+            config,
+            "MODO_CAMERAS",
+            "usb",
+        )
+        or "usb"
+    ).lower()
+
+    # Evita registrar as entradas USB genericas criadas pelo config.py.
+    if modo != "wifi":
+        return
+
+    configuradas = getattr(
+        config,
+        "CAMERAS",
+        {},
+    )
+
+    if not isinstance(
+        configuradas,
+        dict,
+    ):
+        return
+
+    for config_index, dados in sorted(
+        configuradas.items()
+    ):
+        if not isinstance(
+            dados,
+            dict,
+        ):
+            continue
+
+        if not dados.get(
+            "ativa",
+            True,
+        ):
+            continue
+
+        fonte = str(
+            dados.get("fonte")
+            or ""
+        ).strip()
+
+        if not fonte:
+            continue
+
+        nome = str(
+            dados.get("nome")
+            or f"Camera WiFi {int(config_index) + 1:02d}"
+        ).strip()
+
+        try:
+            camera_registry.obter_ou_registrar_rede_selecionada(
+                dados_config=dados,
+                nome=nome,
+                config_index_legado=(
+                    int(config_index)
+                    if isinstance(config_index, int)
+                    else None
+                ),
+            )
+        except Exception as erro:
+            print(
+                f"⚠️ Nao foi possivel sincronizar "
+                f"a camera '{nome}' com o registry: {erro}"
+            )
+
+
 def selecionar_cameras_monitoramento_ambiente():
     """
     ETAPA 1 - Câmeras para monitoramento.
@@ -6595,6 +6926,8 @@ def selecionar_cameras_monitoramento_ambiente():
     vincular ao novo ambiente.
     """
     try:
+        _sincronizar_cameras_wifi_configuradas_com_registry()
+
         cadastradas = (
             camera_registry.listar_cameras()
         )

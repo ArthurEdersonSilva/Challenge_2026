@@ -1,10 +1,14 @@
 import base64
+import json
+import os
 import socket
+import tempfile
 import threading
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -32,6 +36,292 @@ from descobrir_cameras_wifi import (
     testar_stream,
     tentar_rtsp_comum,
 )
+
+
+# ============================================================
+# COMPATIBILIDADE COM O FLUXO LEGADO WIFI
+# ============================================================
+
+_RAIZ_PROJETO = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+    )
+)
+
+_PASTA_CAMERA_WIFI = os.path.join(
+    _RAIZ_PROJETO,
+    "camera_wifi",
+)
+
+_PATH_CAMERAS_WIFI = os.path.join(
+    _PASTA_CAMERA_WIFI,
+    "cameras_wifi.json",
+)
+
+
+def _wifi_legado_vazio() -> Dict[str, Any]:
+    return {
+        "versao": 1,
+        "atualizado_em": datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "modo": "wifi",
+        "cameras": [],
+    }
+
+
+def _carregar_wifi_legado() -> Dict[str, Any]:
+    if not os.path.exists(_PATH_CAMERAS_WIFI):
+        return _wifi_legado_vazio()
+
+    try:
+        with open(
+            _PATH_CAMERAS_WIFI,
+            "r",
+            encoding="utf-8",
+        ) as arquivo:
+            dados = json.load(arquivo)
+    except Exception:
+        return _wifi_legado_vazio()
+
+    if not isinstance(dados, dict):
+        return _wifi_legado_vazio()
+
+    cameras = dados.get("cameras")
+
+    if not isinstance(cameras, list):
+        cameras = []
+
+    dados["versao"] = int(
+        dados.get("versao")
+        or 1
+    )
+    dados["modo"] = "wifi"
+    dados["cameras"] = cameras
+
+    return dados
+
+
+def _salvar_wifi_legado(
+    dados: Dict[str, Any],
+) -> str:
+    os.makedirs(
+        _PASTA_CAMERA_WIFI,
+        exist_ok=True,
+    )
+
+    dados_salvar = deepcopy(dados)
+
+    dados_salvar["versao"] = int(
+        dados_salvar.get("versao")
+        or 1
+    )
+    dados_salvar["modo"] = "wifi"
+    dados_salvar["atualizado_em"] = (
+        datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    )
+
+    cameras = dados_salvar.get("cameras")
+    if not isinstance(cameras, list):
+        dados_salvar["cameras"] = []
+
+    fd, temporario = tempfile.mkstemp(
+        prefix=".cameras_wifi.",
+        suffix=".tmp",
+        dir=_PASTA_CAMERA_WIFI,
+        text=True,
+    )
+
+    try:
+        with os.fdopen(
+            fd,
+            "w",
+            encoding="utf-8",
+        ) as arquivo:
+            json.dump(
+                dados_salvar,
+                arquivo,
+                indent=4,
+                ensure_ascii=False,
+            )
+            arquivo.flush()
+            os.fsync(
+                arquivo.fileno()
+            )
+
+        with open(
+            temporario,
+            "r",
+            encoding="utf-8",
+        ) as arquivo:
+            json.load(arquivo)
+
+        os.replace(
+            temporario,
+            _PATH_CAMERAS_WIFI,
+        )
+
+    except Exception:
+        try:
+            if os.path.exists(
+                temporario
+            ):
+                os.remove(
+                    temporario
+                )
+        except Exception:
+            pass
+        raise
+
+    return _PATH_CAMERAS_WIFI
+
+
+def _sincronizar_camera_rede_wifi_legado(
+    nome: str,
+    fonte: str,
+    onvif: bool = False,
+    portas_detectadas: Optional[List[int]] = None,
+) -> str:
+    """
+    Mantém camera_wifi/cameras_wifi.json sincronizado porque
+    o fluxo atual do main/config ainda depende desse arquivo.
+
+    O registry continua sendo a identidade principal.
+    """
+    fonte = str(
+        fonte
+        or ""
+    ).strip()
+
+    if not fonte:
+        raise ValueError(
+            "URL_STREAM_OBRIGATORIA"
+        )
+
+    parsed = urlparse(
+        fonte
+    )
+
+    dados = _carregar_wifi_legado()
+
+    cameras = [
+        item
+        for item in (
+            dados.get("cameras")
+            or []
+        )
+        if isinstance(item, dict)
+    ]
+
+    existente = None
+
+    for item in cameras:
+        if str(
+            item.get("fonte")
+            or ""
+        ).strip() == fonte:
+            existente = item
+            break
+
+    if existente is None:
+        existente = {}
+        cameras.append(
+            existente
+        )
+
+    # Preserva resolução/FPS antigos, quando já existirem.
+    resolucao_existente = deepcopy(
+        existente.get("resolucao")
+    )
+    fps_existente = existente.get(
+        "fps"
+    )
+
+    existente.clear()
+    existente.update(
+        {
+            "nome": str(
+                nome
+                or "Camera"
+            ).strip(),
+            "tipo": (
+                str(
+                    parsed.scheme
+                    or "wifi"
+                ).lower()
+            ),
+            "fonte": fonte,
+            "ip": parsed.hostname,
+            "ativa": True,
+            "onvif": bool(
+                onvif
+            ),
+            "portas_detectadas": [
+                int(porta)
+                for porta in (
+                    portas_detectadas
+                    or []
+                )
+                if isinstance(
+                    porta,
+                    int,
+                )
+                or str(
+                    porta
+                ).isdigit()
+            ],
+            "resolucao": (
+                resolucao_existente
+                if isinstance(
+                    resolucao_existente,
+                    dict,
+                )
+                else None
+            ),
+            "fps": fps_existente,
+        }
+    )
+
+    dados["cameras"] = cameras
+
+    return _salvar_wifi_legado(
+        dados
+    )
+
+
+def _remover_camera_rede_wifi_legado(
+    fonte: str,
+) -> str:
+    fonte = str(
+        fonte
+        or ""
+    ).strip()
+
+    dados = _carregar_wifi_legado()
+
+    cameras = (
+        dados.get("cameras")
+        or []
+    )
+
+    dados["cameras"] = [
+        item
+        for item in cameras
+        if not (
+            isinstance(item, dict)
+            and str(
+                item.get("fonte")
+                or ""
+            ).strip() == fonte
+        )
+    ]
+
+    return _salvar_wifi_legado(
+        dados
+    )
 
 
 # ============================================================
@@ -506,10 +796,26 @@ def cadastrar_camera_rede(
         camera_uid=camera_uid,
     )
 
+    try:
+        caminho_wifi = _sincronizar_camera_rede_wifi_legado(
+            nome=nome.strip(),
+            fonte=fonte,
+            onvif=bool(onvif),
+            portas_detectadas=portas_detectadas,
+        )
+    except Exception as erro:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_SINCRONIZAR_CAMERA_WIFI",
+            "detalhe": str(erro),
+            "camera": camera,
+        }
+
     return {
         "sucesso": True,
         "erro": None,
         "camera": camera,
+        "camera_wifi_path": caminho_wifi,
     }
 
 
@@ -520,6 +826,13 @@ def editar_camera_rede(
     onvif: Optional[bool] = None,
 ) -> Dict[str, Any]:
     camera_atual = registry_obter_camera(camera_uid)
+
+    fonte_antiga = ""
+    if isinstance(camera_atual, dict):
+        fonte_antiga = str(
+            (camera_atual.get("conexao") or {}).get("fonte")
+            or ""
+        ).strip()
 
     if camera_atual is None:
         return {
@@ -584,10 +897,43 @@ def editar_camera_rede(
         ),
     )
 
+    try:
+        if (
+            fonte_antiga
+            and fonte_antiga != fonte
+        ):
+            _remover_camera_rede_wifi_legado(
+                fonte_antiga
+            )
+
+        caminho_wifi = _sincronizar_camera_rede_wifi_legado(
+            nome=nome,
+            fonte=fonte,
+            onvif=bool(
+                dados_config.get(
+                    "onvif",
+                    False,
+                )
+            ),
+            portas_detectadas=(
+                [parsed.port]
+                if parsed.port is not None
+                else []
+            ),
+        )
+    except Exception as erro:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_SINCRONIZAR_CAMERA_WIFI",
+            "detalhe": str(erro),
+            "camera": camera,
+        }
+
     return {
         "sucesso": True,
         "erro": None,
         "camera": camera,
+        "camera_wifi_path": caminho_wifi,
     }
 
 
@@ -880,6 +1226,19 @@ def remover_camera(
 ) -> Dict[str, Any]:
     camera = registry_obter_camera(camera_uid)
 
+    fonte_rede = ""
+    if isinstance(camera, dict):
+        tipo_camera = str(
+            camera.get("tipo")
+            or ""
+        ).strip().lower()
+
+        if tipo_camera != "usb":
+            fonte_rede = str(
+                (camera.get("conexao") or {}).get("fonte")
+                or ""
+            ).strip()
+
     if camera is None:
         return {
             "sucesso": False,
@@ -909,10 +1268,26 @@ def remover_camera(
             "erro": "CAMERA_NAO_ENCONTRADA",
         }
 
+    caminho_wifi = None
+
+    if fonte_rede:
+        try:
+            caminho_wifi = _remover_camera_rede_wifi_legado(
+                fonte_rede
+            )
+        except Exception as erro:
+            return {
+                "sucesso": False,
+                "erro": "ERRO_SINCRONIZAR_CAMERA_WIFI",
+                "detalhe": str(erro),
+                "camera_uid": camera_uid,
+            }
+
     return {
         "sucesso": True,
         "erro": None,
         "camera_uid": camera_uid,
+        "camera_wifi_path": caminho_wifi,
     }
 
 

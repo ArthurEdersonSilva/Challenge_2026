@@ -11,7 +11,16 @@ from urllib.parse import urlparse
 
 
 SCHEMA_VERSION = 1
-PASTA_CONFIGURACOES = "configuracoes"
+
+# Caminho absoluto baseado na pasta deste arquivo.
+# Isso garante que main.py, scripts em front/ e qualquer outro
+# ponto de entrada usem SEMPRE o mesmo cadastro de câmeras,
+# independentemente do diretório atual do terminal/VS Code.
+RAIZ_PROJETO = os.path.dirname(os.path.abspath(__file__))
+PASTA_CONFIGURACOES = os.path.join(
+    RAIZ_PROJETO,
+    "configuracoes",
+)
 PATH_REGISTRY = os.path.join(
     PASTA_CONFIGURACOES,
     "cameras_registry.json",

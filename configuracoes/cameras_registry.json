@@ -1,0 +1,108 @@
+{
+    "schema_version": 1,
+    "cameras": [
+        {
+            "camera_uid": "6fb6e260-9251-4aca-a776-72952e4dd205",
+            "nome": "Celular",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://192.168.0.4:8554/",
+                "host": "192.168.0.4",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": {
+                    "largura": 960,
+                    "altura": 1280
+                },
+                "fps": null
+            },
+            "compatibilidade": {
+                "config_index_legado": 0
+            },
+            "metadata": {
+                "criado_em": "2026-09-21T17:05:57.211609+00:00",
+                "atualizado_em": "2026-09-21T17:19:23.495965+00:00"
+            }
+        },
+        {
+            "camera_uid": "a610a98f-f65c-432e-a7b0-47bbe656b6e8",
+            "nome": "Celular",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://192.168.0.4:8554/",
+                "host": "192.168.0.4",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {},
+            "metadata": {
+                "criado_em": "2026-09-21T17:51:28.421276+00:00",
+                "atualizado_em": "2026-09-21T17:51:28.421276+00:00"
+            }
+        },
+        {
+            "camera_uid": "94b19b40-9b5b-4c8f-83d6-25b70aab897c",
+            "nome": "Celular",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://192.168.0.4:8554/",
+                "host": "192.168.0.4",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {},
+            "metadata": {
+                "criado_em": "2026-09-21T17:56:25.373212+00:00",
+                "atualizado_em": "2026-09-21T17:56:25.373212+00:00"
+            }
+        },
+        {
+            "camera_uid": "d49d241a-10da-4905-b38c-e2af77e88777",
+            "nome": "Celular",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://192.168.0.4:8554/",
+                "host": "192.168.0.4",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {
+                "config_index_legado": 0
+            },
+            "metadata": {
+                "criado_em": "2026-09-21T18:24:49.373598+00:00",
+                "atualizado_em": "2026-09-21T18:24:49.373598+00:00"
+            }
+        }
+    ],
+    "metadata": {
+        "criado_em": "2026-09-21T17:05:57.211609+00:00",
+        "atualizado_em": "2026-09-21T18:24:49.373598+00:00"
+    }
+}

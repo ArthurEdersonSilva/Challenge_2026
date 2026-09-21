@@ -1,4 +1,6 @@
 import base64
+import os
+import tempfile
 import threading
 import uuid
 
@@ -34,6 +36,42 @@ from services.camera_service import (
 from services.incidente_service import (
     contar_infracoes_hoje_por_ambiente,
 )
+
+
+# ============================================================
+# FOTO DO AMBIENTE
+# ============================================================
+
+_RAIZ_PROJETO = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+    )
+)
+
+_PASTA_IMAGENS_AMBIENTES = os.path.join(
+    _RAIZ_PROJETO,
+    "ambientes",
+    "imagens",
+)
+
+
+def _foto_relativa_ambiente(
+    ambiente_id: str,
+) -> str:
+    return (
+        f"ambientes/imagens/"
+        f"{ambiente_id}.jpg"
+    )
+
+
+def _foto_absoluta_ambiente(
+    ambiente_id: str,
+) -> str:
+    return os.path.join(
+        _PASTA_IMAGENS_AMBIENTES,
+        f"{ambiente_id}.jpg",
+    )
 
 
 # ============================================================
@@ -172,13 +210,8 @@ def _resolver_cameras_para_perfil(
 
         referencias.append(_montar_referencia_camera(camera))
 
-    if not referencias:
-        return {
-            "sucesso": False,
-            "erro": "AMBIENTE_SEM_CAMERA",
-            "cameras": [],
-        }
-
+    # Ambiente pode existir sem câmera vinculada.
+    # Se camera_uids vier vazio, o perfil é criado normalmente.
     return {
         "sucesso": True,
         "erro": None,
@@ -204,6 +237,18 @@ def listar_ambientes() -> Dict[str, Any]:
             {
                 "ambiente_id": perfil.get("ambiente_id"),
                 "nome": perfil.get("nome"),
+                "descricao": str(
+                    perfil.get("descricao") or ""
+                ),
+                "foto_ambiente": str(
+                    perfil.get("foto_ambiente") or ""
+                ),
+                "possui_foto": bool(
+                    str(
+                        perfil.get("foto_ambiente")
+                        or ""
+                    ).strip()
+                ),
                 "calibrado": perfil.get("calibrado", False),
                 "quantidade_cameras": len(cameras) if isinstance(cameras, list) else 0,
                 "quantidade_epis": len(epis) if isinstance(epis, list) else 0,
@@ -278,7 +323,7 @@ def listar_cameras_para_ambiente() -> Dict[str, Any]:
 
 def criar_ambiente(
     nome: str,
-    camera_uids: List[str],
+    camera_uids: Optional[List[str]] = None,
     epis_obrigatorios: Optional[List[str]] = None,
     descricao: str = "",
 ) -> Dict[str, Any]:
@@ -429,6 +474,7 @@ def editar_ambiente_basico(
         perfil.setdefault("descricao", "")
         perfil.setdefault("rois", {})
         perfil.setdefault("colaboradores_vinculados", [])
+    perfil.setdefault("foto_ambiente", "")
 
     try:
         ambientes.salvar_perfil(perfil)
@@ -474,6 +520,11 @@ def remover_ambiente(
             "erro": "AMBIENTE_NAO_ENCONTRADO",
         }
 
+    foto_ambiente = str(
+        perfil.get("foto_ambiente")
+        or ""
+    ).strip()
+
     removido = ambientes.remover_perfil(ambiente_id)
 
     if not removido:
@@ -482,11 +533,393 @@ def remover_ambiente(
             "erro": "ERRO_REMOVER_AMBIENTE",
         }
 
+    if foto_ambiente:
+        caminho_foto = _foto_absoluta_ambiente(
+            ambiente_id
+        )
+
+        try:
+            if os.path.exists(caminho_foto):
+                os.remove(caminho_foto)
+        except Exception:
+            # O ambiente já foi removido. Falha ao limpar a imagem
+            # não recria o perfil nem interrompe a remoção.
+            pass
+
     return {
         "sucesso": True,
         "erro": None,
         "ambiente_id": ambiente_id,
         "nome": perfil.get("nome"),
+    }
+
+
+# ============================================================
+# FOTO DO AMBIENTE
+# ============================================================
+
+def salvar_foto_ambiente(
+    ambiente_id: str,
+    imagem_base64: str,
+    qualidade_jpeg: int = 90,
+) -> Dict[str, Any]:
+    """
+    Salva uma foto física do ambiente e persiste somente
+    o caminho relativo no JSON do ambiente.
+
+    Aceita Base64 puro ou Data URL:
+        data:image/jpeg;base64,...
+    """
+    perfil = _buscar_perfil_por_id(
+        ambiente_id
+    )
+
+    if perfil is None:
+        return {
+            "sucesso": False,
+            "erro": "AMBIENTE_NAO_ENCONTRADO",
+        }
+
+    if not isinstance(
+        imagem_base64,
+        str,
+    ) or not imagem_base64.strip():
+        return {
+            "sucesso": False,
+            "erro": "FOTO_AMBIENTE_OBRIGATORIA",
+        }
+
+    conteudo = imagem_base64.strip()
+
+    if conteudo.lower().startswith(
+        "data:image/"
+    ):
+        partes = conteudo.split(
+            ",",
+            1,
+        )
+
+        if len(partes) != 2:
+            return {
+                "sucesso": False,
+                "erro": "FOTO_AMBIENTE_BASE64_INVALIDA",
+            }
+
+        conteudo = partes[1]
+
+    try:
+        dados = base64.b64decode(
+            conteudo,
+            validate=True,
+        )
+        buffer = np.frombuffer(
+            dados,
+            dtype=np.uint8,
+        )
+        frame = cv2.imdecode(
+            buffer,
+            cv2.IMREAD_COLOR,
+        )
+    except Exception:
+        frame = None
+
+    if frame is None or frame.size == 0:
+        return {
+            "sucesso": False,
+            "erro": "FOTO_AMBIENTE_INVALIDA",
+        }
+
+    try:
+        qualidade = int(
+            qualidade_jpeg
+        )
+    except (TypeError, ValueError):
+        qualidade = 90
+
+    qualidade = max(
+        1,
+        min(100, qualidade),
+    )
+
+    ok, jpeg = cv2.imencode(
+        ".jpg",
+        frame,
+        [
+            cv2.IMWRITE_JPEG_QUALITY,
+            qualidade,
+        ],
+    )
+
+    if not ok:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_CODIFICAR_FOTO_AMBIENTE",
+        }
+
+    os.makedirs(
+        _PASTA_IMAGENS_AMBIENTES,
+        exist_ok=True,
+    )
+
+    caminho_final = (
+        _foto_absoluta_ambiente(
+            ambiente_id
+        )
+    )
+
+    fd, temporario = tempfile.mkstemp(
+        prefix=f".{ambiente_id}.",
+        suffix=".jpg.tmp",
+        dir=_PASTA_IMAGENS_AMBIENTES,
+    )
+
+    try:
+        with os.fdopen(
+            fd,
+            "wb",
+        ) as arquivo:
+            arquivo.write(
+                jpeg.tobytes()
+            )
+            arquivo.flush()
+            os.fsync(
+                arquivo.fileno()
+            )
+
+        caminho_relativo = (
+            _foto_relativa_ambiente(
+                ambiente_id
+            )
+        )
+
+        perfil["schema_version"] = (
+            ambientes.SCHEMA_VERSION
+        )
+        perfil.setdefault(
+            "descricao",
+            "",
+        )
+        perfil.setdefault(
+            "rois",
+            {},
+        )
+        perfil.setdefault(
+            "colaboradores_vinculados",
+            [],
+        )
+        perfil["foto_ambiente"] = (
+            caminho_relativo
+        )
+
+        ambientes.salvar_perfil(
+            perfil
+        )
+
+        os.replace(
+            temporario,
+            caminho_final,
+        )
+
+    except ValueError as erro:
+        try:
+            if os.path.exists(
+                temporario
+            ):
+                os.remove(
+                    temporario
+                )
+        except Exception:
+            pass
+
+        return {
+            "sucesso": False,
+            "erro": "PERFIL_AMBIENTE_INVALIDO",
+            "detalhe": str(erro),
+        }
+
+    except Exception as erro:
+        try:
+            if os.path.exists(
+                temporario
+            ):
+                os.remove(
+                    temporario
+                )
+        except Exception:
+            pass
+
+        return {
+            "sucesso": False,
+            "erro": "ERRO_SALVAR_FOTO_AMBIENTE",
+            "detalhe": str(erro),
+        }
+
+    altura, largura = frame.shape[:2]
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "ambiente_id": ambiente_id,
+        "foto_ambiente": caminho_relativo,
+        "largura": int(largura),
+        "altura": int(altura),
+        "mime_type": "image/jpeg",
+    }
+
+
+def capturar_foto_ambiente(
+    ambiente_id: str,
+    session_id: str,
+    qualidade_jpeg: int = 90,
+) -> Dict[str, Any]:
+    """
+    Usa um frame da sessão de preview já aberta e salva
+    esse frame como foto do ambiente.
+    """
+    session_id = str(
+        session_id or ""
+    ).strip()
+
+    if not session_id:
+        return {
+            "sucesso": False,
+            "erro": "SESSION_ID_OBRIGATORIO",
+        }
+
+    frame = obter_frame_preview(
+        session_id
+    )
+
+    if not frame.get("sucesso"):
+        return {
+            "sucesso": False,
+            "erro": (
+                frame.get("erro")
+                or "ERRO_OBTER_FRAME_PREVIEW"
+            ),
+        }
+
+    return salvar_foto_ambiente(
+        ambiente_id=ambiente_id,
+        imagem_base64=frame.get(
+            "frame_base64"
+        ),
+        qualidade_jpeg=qualidade_jpeg,
+    )
+
+
+def obter_foto_ambiente(
+    ambiente_id: str,
+) -> Dict[str, Any]:
+    perfil = _buscar_perfil_por_id(
+        ambiente_id
+    )
+
+    if perfil is None:
+        return {
+            "sucesso": False,
+            "erro": "AMBIENTE_NAO_ENCONTRADO",
+        }
+
+    foto_relativa = str(
+        perfil.get("foto_ambiente")
+        or ""
+    ).strip()
+
+    if not foto_relativa:
+        return {
+            "sucesso": False,
+            "erro": "FOTO_AMBIENTE_NAO_DEFINIDA",
+            "ambiente_id": ambiente_id,
+        }
+
+    caminho = _foto_absoluta_ambiente(
+        ambiente_id
+    )
+
+    if not os.path.exists(
+        caminho
+    ):
+        return {
+            "sucesso": False,
+            "erro": "ARQUIVO_FOTO_AMBIENTE_NAO_ENCONTRADO",
+            "ambiente_id": ambiente_id,
+            "foto_ambiente": foto_relativa,
+        }
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "ambiente_id": ambiente_id,
+        "foto_ambiente": foto_relativa,
+        "caminho_absoluto": caminho,
+        "mime_type": "image/jpeg",
+    }
+
+
+def remover_foto_ambiente(
+    ambiente_id: str,
+) -> Dict[str, Any]:
+    perfil = _buscar_perfil_por_id(
+        ambiente_id
+    )
+
+    if perfil is None:
+        return {
+            "sucesso": False,
+            "erro": "AMBIENTE_NAO_ENCONTRADO",
+        }
+
+    caminho = _foto_absoluta_ambiente(
+        ambiente_id
+    )
+
+    try:
+        if os.path.exists(
+            caminho
+        ):
+            os.remove(
+                caminho
+            )
+    except Exception as erro:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_REMOVER_FOTO_AMBIENTE",
+            "detalhe": str(erro),
+        }
+
+    perfil["schema_version"] = (
+        ambientes.SCHEMA_VERSION
+    )
+    perfil.setdefault(
+        "descricao",
+        "",
+    )
+    perfil.setdefault(
+        "rois",
+        {},
+    )
+    perfil.setdefault(
+        "colaboradores_vinculados",
+        [],
+    )
+    perfil["foto_ambiente"] = ""
+
+    try:
+        ambientes.salvar_perfil(
+            perfil
+        )
+    except Exception as erro:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_SALVAR_AMBIENTE",
+            "detalhe": str(erro),
+        }
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "ambiente_id": ambiente_id,
     }
 
 
@@ -2794,9 +3227,6 @@ def obter_revisao_ambiente(
     if not str(perfil.get("nome") or "").strip():
         pendencias.append("NOME_AMBIENTE_OBRIGATORIO")
 
-    if not cameras:
-        pendencias.append("CAMERA_OBRIGATORIA")
-
     if cameras_sem_roi:
         if legado_calibrado:
             avisos.append("AMBIENTE_LEGADO_SEM_ROI")
@@ -2809,6 +3239,15 @@ def obter_revisao_ambiente(
         "ambiente_id": ambiente_id,
         "nome": perfil.get("nome"),
         "descricao": str(perfil.get("descricao") or ""),
+        "foto_ambiente": str(
+            perfil.get("foto_ambiente") or ""
+        ),
+        "possui_foto": bool(
+            str(
+                perfil.get("foto_ambiente")
+                or ""
+            ).strip()
+        ),
         "schema_version": schema_version,
         "calibrado": calibrado,
         "legado_calibrado": legado_calibrado,
@@ -2893,6 +3332,7 @@ def finalizar_ambiente(
     perfil.setdefault("descricao", "")
     perfil.setdefault("rois", {})
     perfil.setdefault("colaboradores_vinculados", [])
+    perfil.setdefault("foto_ambiente", "")
     perfil["calibrado"] = True
 
     try:
@@ -2988,8 +3428,8 @@ def _status_ambiente_com_mapa(
         status_ambiente = "INATIVO"
         motivo = "AMBIENTE_NAO_FINALIZADO"
     elif not cameras:
-        status_ambiente = "COM_PROBLEMA"
-        motivo = "SEM_CAMERAS"
+        status_ambiente = "INATIVO"
+        motivo = "SEM_CAMERAS_VINCULADAS"
     elif detalhes_cameras and all(
         item.get("online") is True
         for item in detalhes_cameras
@@ -3122,6 +3562,15 @@ def _resumo_consulta_ambiente(
         "ambiente_id": perfil.get("ambiente_id"),
         "nome": perfil.get("nome"),
         "descricao": str(perfil.get("descricao") or ""),
+        "foto_ambiente": str(
+            perfil.get("foto_ambiente") or ""
+        ),
+        "possui_foto": bool(
+            str(
+                perfil.get("foto_ambiente")
+                or ""
+            ).strip()
+        ),
         "schema_version": perfil.get("schema_version"),
         "calibrado": bool(perfil.get("calibrado", False)),
         "status": status.get("status"),
@@ -3420,6 +3869,15 @@ def obter_detalhes_ambiente_consulta(
         "nome": perfil.get("nome"),
         "descricao": str(
             perfil.get("descricao") or ""
+        ),
+        "foto_ambiente": str(
+            perfil.get("foto_ambiente") or ""
+        ),
+        "possui_foto": bool(
+            str(
+                perfil.get("foto_ambiente")
+                or ""
+            ).strip()
         ),
         "schema_version": perfil.get(
             "schema_version"

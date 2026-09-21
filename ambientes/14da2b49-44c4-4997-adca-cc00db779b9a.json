@@ -1,0 +1,135 @@
+{
+    "schema_version": 5,
+    "ambiente_id": "14da2b49-44c4-4997-adca-cc00db779b9a",
+    "nome": "lçml",
+    "descricao": "1",
+    "calibrado": true,
+    "cameras": [
+        {
+            "camera_uid": "6fb6e260-9251-4aca-a776-72952e4dd205",
+            "tipo": "rtsp",
+            "nome": "Celular"
+        }
+    ],
+    "epis_obrigatorios": [
+        "Capacete"
+    ],
+    "objetos_globais": {
+        "OBJETO_001": {
+            "id": "OBJETO_001",
+            "numero": 1,
+            "nome": "Objeto 1",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    135,
+                    4,
+                    453,
+                    329
+                ]
+            },
+            "maquinario": true
+        },
+        "OBJETO_002": {
+            "id": "OBJETO_002",
+            "numero": 2,
+            "nome": "Objeto 2",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    0,
+                    5,
+                    343,
+                    376
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_003": {
+            "id": "OBJETO_003",
+            "numero": 3,
+            "nome": "Objeto 3",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    280,
+                    49,
+                    342,
+                    341
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_004": {
+            "id": "OBJETO_004",
+            "numero": 4,
+            "nome": "Objeto 4",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    137,
+                    158,
+                    313,
+                    429
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_005": {
+            "id": "OBJETO_005",
+            "numero": 5,
+            "nome": "Objeto 5",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    199,
+                    202,
+                    284,
+                    341
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_006": {
+            "id": "OBJETO_006",
+            "numero": 6,
+            "nome": "Objeto 6",
+            "cameras": [
+                1
+            ],
+            "deteccoes": {
+                "1": [
+                    204,
+                    491,
+                    453,
+                    567
+                ]
+            },
+            "maquinario": false
+        }
+    },
+    "rois": {
+        "6fb6e260-9251-4aca-a776-72952e4dd205": {
+            "x1": 0.15729166666666666,
+            "y1": 0.2984375,
+            "x2": 0.6291666666666667,
+            "y2": 0.74140625
+        }
+    },
+    "colaboradores_vinculados": [],
+    "metadata": {
+        "criado_em": "2026-09-21T17:19:28.354859+00:00",
+        "atualizado_em": "2026-09-21T17:19:56.371403+00:00",
+        "origem": "novo"
+    }
+}
