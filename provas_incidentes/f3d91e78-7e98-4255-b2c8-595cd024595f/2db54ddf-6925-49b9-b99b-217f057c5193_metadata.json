@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "evidencia_id": "2db54ddf-6925-49b9-b99b-217f057c5193",
+  "incidente_id": "f3d91e78-7e98-4255-b2c8-595cd024595f",
+  "criado_em": "2026-09-22T22:56:45.439313+00:00",
+  "confianca_deteccao": 0.7286889553070068,
+  "epis_analisados": [
+    {
+      "epi": "Capacete",
+      "estado": "AUSENTE",
+      "confianca_deteccao": 0.7286889553070068
+    }
+  ],
+  "maquinario_relacionado": null
+}

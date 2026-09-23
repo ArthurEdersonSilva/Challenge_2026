@@ -1,0 +1,257 @@
+{
+    "schema_version": 6,
+    "ambiente_id": "b1d5ae4b-2b0f-4eb5-823d-c8ffa007f6bf",
+    "nome": "Sala De Aula",
+    "descricao": "Teste",
+    "foto_ambiente": "",
+    "calibrado": true,
+    "cameras": [
+        {
+            "camera_uid": "72c611a3-3ae6-4b77-a3fa-ff96e89518cf",
+            "tipo": "rtsp",
+            "nome": "Sala 1"
+        }
+    ],
+    "epis_obrigatorios": [
+        "Capacete"
+    ],
+    "objetos_globais": {
+        "OBJETO_001": {
+            "id": "OBJETO_001",
+            "numero": 1,
+            "nome": "Objeto 1",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    563,
+                    399,
+                    654,
+                    500
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_002": {
+            "id": "OBJETO_002",
+            "numero": 2,
+            "nome": "Objeto 2",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    602,
+                    399,
+                    667,
+                    477
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_003": {
+            "id": "OBJETO_003",
+            "numero": 3,
+            "nome": "Objeto 3",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    654,
+                    399,
+                    771,
+                    469
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_004": {
+            "id": "OBJETO_004",
+            "numero": 4,
+            "nome": "Objeto 4",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    838,
+                    399,
+                    1029,
+                    523
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_005": {
+            "id": "OBJETO_005",
+            "numero": 5,
+            "nome": "Objeto 5",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    668,
+                    446,
+                    1027,
+                    819
+                ]
+            },
+            "maquinario": true
+        },
+        "OBJETO_006": {
+            "id": "OBJETO_006",
+            "numero": 6,
+            "nome": "Objeto 6",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    614,
+                    449,
+                    732,
+                    587
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_007": {
+            "id": "OBJETO_007",
+            "numero": 7,
+            "nome": "Objeto 7",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    862,
+                    491,
+                    950,
+                    579
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_008": {
+            "id": "OBJETO_008",
+            "numero": 8,
+            "nome": "Objeto 8",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    512,
+                    509,
+                    612,
+                    629
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_009": {
+            "id": "OBJETO_009",
+            "numero": 9,
+            "nome": "Objeto 9",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    576,
+                    593,
+                    660,
+                    671
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_010": {
+            "id": "OBJETO_010",
+            "numero": 10,
+            "nome": "Objeto 10",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    858,
+                    658,
+                    918,
+                    738
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_011": {
+            "id": "OBJETO_011",
+            "numero": 11,
+            "nome": "Objeto 11",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    831,
+                    687,
+                    949,
+                    785
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_012": {
+            "id": "OBJETO_012",
+            "numero": 12,
+            "nome": "Objeto 12",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    885,
+                    733,
+                    1029,
+                    904
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_013": {
+            "id": "OBJETO_013",
+            "numero": 13,
+            "nome": "Objeto 13",
+            "cameras": [
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf"
+            ],
+            "deteccoes": {
+                "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": [
+                    771,
+                    809,
+                    870,
+                    904
+                ]
+            },
+            "maquinario": false
+        }
+    },
+    "rois": {
+        "72c611a3-3ae6-4b77-a3fa-ff96e89518cf": {
+            "x1": 0.177734375,
+            "y1": 0.2763888888888889,
+            "x2": 0.401953125,
+            "y2": 0.6277777777777778
+        }
+    },
+    "colaboradores_vinculados": [
+        "5743267"
+    ],
+    "metadata": {
+        "criado_em": "2026-09-22T23:47:57.351604+00:00",
+        "atualizado_em": "2026-09-22T23:48:51.227575+00:00",
+        "origem": "novo"
+    }
+}

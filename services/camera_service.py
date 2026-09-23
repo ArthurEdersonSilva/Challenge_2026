@@ -487,6 +487,10 @@ def _abrir_video_capture_rede(
                     cv2.CAP_PROP_READ_TIMEOUT_MSEC,
                     timeout,
                 )
+            if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+                # Nem todo backend OpenCV/FFmpeg respeita este valor,
+                # mas quando suportado reduz o buffer interno do stream.
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
 
@@ -1583,7 +1587,400 @@ def listar_cameras_com_status(
 # PREVIEW
 # ============================================================
 
+def _normalizar_qualidade_jpeg_preview(qualidade_jpeg: int) -> int:
+    try:
+        qualidade = int(qualidade_jpeg)
+    except (TypeError, ValueError):
+        qualidade = 80
+
+    return max(1, min(100, qualidade))
+
+
+def _loop_captura_preview(sessao: Dict[str, Any]) -> None:
+    """
+    Drena o VideoCapture continuamente e mantém apenas o frame mais recente.
+
+    O frontend pode consultar a sessão mais devagar do que a câmera produz
+    frames sem criar uma fila de atraso. Frames antigos são descartados.
+    """
+    stop_event = sessao.get("stop_event")
+    if stop_event is None:
+        return
+
+    while not stop_event.is_set():
+        cap = sessao.get("cap")
+
+        if cap is None or not cap.isOpened():
+            with sessao["lock"]:
+                sessao["capture_erro"] = "PREVIEW_INDISPONIVEL"
+            stop_event.wait(0.05)
+            continue
+
+        try:
+            with sessao["cap_lock"]:
+                if stop_event.is_set():
+                    break
+
+                cap_atual = sessao.get("cap")
+                if cap_atual is None or not cap_atual.isOpened():
+                    ret = False
+                    frame = None
+                else:
+                    ret, frame = cap_atual.read()
+        except Exception:
+            ret = False
+            frame = None
+
+        if stop_event.is_set():
+            break
+
+        if not ret or frame is None or frame.size == 0:
+            with sessao["lock"]:
+                sessao["capture_erro"] = "FRAME_PREVIEW_NAO_RECEBIDO"
+            stop_event.wait(0.03)
+            continue
+
+        altura, largura = frame.shape[:2]
+
+        with sessao["lock"]:
+            # Sem fila: o frame anterior é substituído imediatamente.
+            sessao["ultimo_frame"] = frame
+            sessao["largura"] = int(largura)
+            sessao["altura"] = int(altura)
+            sessao["capture_erro"] = None
+            sessao["frame_seq"] = int(sessao.get("frame_seq") or 0) + 1
+
+
+def _iniciar_worker_preview(sessao: Dict[str, Any]) -> None:
+    stop_event = threading.Event()
+    sessao["stop_event"] = stop_event
+    sessao["cap_lock"] = threading.RLock()
+    sessao["ultimo_frame"] = sessao.get("frame_inicial")
+    sessao["frame_inicial"] = None
+    sessao["capture_erro"] = None
+    sessao["frame_seq"] = 0
+
+    thread = threading.Thread(
+        target=_loop_captura_preview,
+        args=(sessao,),
+        name=f"preview-{sessao.get('session_id')}",
+        daemon=True,
+    )
+    sessao["capture_thread"] = thread
+    thread.start()
+
+
+def _parar_worker_preview(
+    sessao: Dict[str, Any],
+    liberar_capture: bool = True,
+) -> None:
+    stop_event = sessao.get("stop_event")
+    thread = sessao.get("capture_thread")
+
+    if stop_event is not None:
+        stop_event.set()
+
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=1.0)
+
+    if liberar_capture:
+        cap_lock = sessao.get("cap_lock")
+        cap = sessao.get("cap")
+        try:
+            if cap_lock is not None:
+                with cap_lock:
+                    if cap is not None:
+                        cap.release()
+            elif cap is not None:
+                cap.release()
+        except Exception:
+            pass
+        sessao["cap"] = None
+
+    sessao["capture_thread"] = None
+
+
+def _abrir_capture_preview_temporario_rede(
+    fonte: str,
+    timeout_ms: int = 3000,
+) -> Dict[str, Any]:
+    fonte = str(fonte or "").strip()
+
+    if not fonte:
+        return {
+            "sucesso": False,
+            "erro": "URL_STREAM_OBRIGATORIA",
+        }
+
+    parsed = urlparse(fonte)
+    porta = _porta_padrao(parsed)
+
+    if not _porta_acessivel(parsed.hostname, porta):
+        return {
+            "sucesso": False,
+            "erro": "STREAM_INDISPONIVEL",
+        }
+
+    cap = _abrir_video_capture_rede(
+        fonte,
+        timeout_ms=timeout_ms,
+    )
+
+    if cap is None or not cap.isOpened():
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        return {
+            "sucesso": False,
+            "erro": "STREAM_INDISPONIVEL",
+        }
+
+    try:
+        ret, frame = cap.read()
+    except Exception:
+        ret = False
+        frame = None
+
+    if not ret or frame is None or frame.size == 0:
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+        return {
+            "sucesso": False,
+            "erro": "FRAME_NAO_RECEBIDO",
+        }
+
+    altura, largura = frame.shape[:2]
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "cap": cap,
+        "tipo": str(parsed.scheme or "rede").lower(),
+        "fonte": fonte,
+        "frame_inicial": frame,
+        "largura": int(largura),
+        "altura": int(altura),
+        "fps": _normalizar_fps(cap.get(cv2.CAP_PROP_FPS)),
+    }
+
+
+def _abrir_capture_preview_temporario_usb(
+    indice: int,
+) -> Dict[str, Any]:
+    dispositivos = enumerar_dispositivos_usb()
+    dispositivo = obter_dispositivo_por_indice(
+        int(indice),
+        dispositivos,
+    )
+
+    if dispositivo is None:
+        return {
+            "sucesso": False,
+            "erro": "CAMERA_USB_NAO_ENCONTRADA",
+        }
+
+    cap = None
+
+    try:
+        cap = cv2.VideoCapture(
+            int(indice),
+            cv2.CAP_DSHOW,
+        )
+
+        if cap is None or not cap.isOpened():
+            if cap is not None:
+                cap.release()
+            return {
+                "sucesso": False,
+                "erro": "CAMERA_USB_INDISPONIVEL",
+            }
+
+        ret, frame = cap.read()
+
+        if not ret or frame is None or frame.size == 0:
+            cap.release()
+            return {
+                "sucesso": False,
+                "erro": "FRAME_USB_NAO_RECEBIDO",
+            }
+
+        altura, largura = frame.shape[:2]
+
+        return {
+            "sucesso": True,
+            "erro": None,
+            "cap": cap,
+            "tipo": "usb",
+            "fonte": int(indice),
+            "frame_inicial": frame,
+            "largura": int(largura),
+            "altura": int(altura),
+            "fps": _normalizar_fps(cap.get(cv2.CAP_PROP_FPS)),
+            "nome_dispositivo": dispositivo.get("nome_dispositivo"),
+        }
+
+    except Exception:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        return {
+            "sucesso": False,
+            "erro": "ERRO_TESTE_CAMERA_USB",
+        }
+
+
+def iniciar_preview_temporario(
+    fonte: Optional[str] = None,
+    candidato: Optional[Dict[str, Any]] = None,
+    usuario: Optional[str] = None,
+    senha: Optional[str] = None,
+    indice_usb: Optional[int] = None,
+    nome: Optional[str] = None,
+    qualidade_jpeg: int = 80,
+    timeout_ms: int = 3000,
+) -> Dict[str, Any]:
+    """
+    Abre uma sessão de preview sem cadastrar a câmera.
+
+    A sessão temporária usa o mesmo repositório de previews do fluxo
+    normal, portanto `obter_frame_preview()` e `parar_preview()`
+    funcionam sem qualquer tratamento especial no frontend.
+    """
+    try:
+        timeout = max(250, int(timeout_ms))
+    except (TypeError, ValueError):
+        timeout = 3000
+
+    origem = None
+    abertura = None
+    indice_normalizado = None
+
+    if indice_usb is not None:
+        try:
+            indice_normalizado = int(indice_usb)
+        except (TypeError, ValueError):
+            return {
+                "sucesso": False,
+                "erro": "INDICE_USB_INVALIDO",
+            }
+
+        origem = "usb"
+        abertura = _abrir_capture_preview_temporario_usb(
+            indice_normalizado
+        )
+
+    else:
+        fonte_final = str(fonte or "").strip()
+
+        if not fonte_final and isinstance(candidato, dict):
+            ip = candidato.get("ip")
+            portas = candidato.get("portas", [])
+
+            if not ip:
+                return {
+                    "sucesso": False,
+                    "erro": "IP_CAMERA_INVALIDO",
+                }
+
+            stream = tentar_rtsp_comum(
+                ip,
+                portas,
+                usuario=usuario or None,
+                senha=senha or None,
+            )
+
+            if stream is None or not stream.get("url"):
+                return {
+                    "sucesso": False,
+                    "erro": "STREAM_NAO_DESCOBERTO",
+                }
+
+            fonte_final = str(stream.get("url")).strip()
+        elif fonte_final:
+            fonte_final = _aplicar_credenciais_url(
+                fonte_final,
+                usuario,
+                senha,
+            )
+
+        if not fonte_final:
+            return {
+                "sucesso": False,
+                "erro": "FONTE_OU_CANDIDATO_OBRIGATORIO",
+            }
+
+        origem = "rede"
+        abertura = _abrir_capture_preview_temporario_rede(
+            fonte_final,
+            timeout_ms=timeout,
+        )
+
+    if not abertura or not abertura.get("sucesso"):
+        return {
+            "sucesso": False,
+            "erro": (abertura or {}).get("erro") or "CAMERA_INDISPONIVEL",
+        }
+
+    session_id = str(uuid.uuid4())
+    qualidade = _normalizar_qualidade_jpeg_preview(qualidade_jpeg)
+
+    nome_sessao = str(
+        nome
+        or abertura.get("nome_dispositivo")
+        or (candidato or {}).get("nome_onvif")
+        or (candidato or {}).get("nome")
+        or "Câmera temporária"
+    ).strip()
+
+    sessao = {
+        "session_id": session_id,
+        "camera_uid": None,
+        "temporario": True,
+        "origem": origem,
+        "nome": nome_sessao,
+        "tipo": abertura.get("tipo"),
+        "fonte": abertura.get("fonte"),
+        "indice_usb": indice_normalizado,
+        "cap": abertura["cap"],
+        "qualidade_jpeg": qualidade,
+        "timeout_ms": timeout,
+        "lock": threading.RLock(),
+        "frame_inicial": abertura.get("frame_inicial"),
+        "largura": abertura.get("largura"),
+        "altura": abertura.get("altura"),
+        "fps": abertura.get("fps"),
+    }
+
+    with _PREVIEWS_LOCK:
+        _PREVIEWS[session_id] = sessao
+
+    _iniciar_worker_preview(sessao)
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "session_id": session_id,
+        "temporario": True,
+        "origem": origem,
+        "nome": nome_sessao,
+        "tipo": abertura.get("tipo"),
+        "largura": abertura.get("largura"),
+        "altura": abertura.get("altura"),
+        "fps": abertura.get("fps"),
+    }
+
+
 def iniciar_preview(
+
     camera_uid: str,
     qualidade_jpeg: int = 80,
     timeout_ms: int = 3000,
@@ -1610,16 +2007,13 @@ def iniciar_preview(
 
     session_id = str(uuid.uuid4())
 
-    try:
-        qualidade = int(qualidade_jpeg)
-    except (TypeError, ValueError):
-        qualidade = 80
-
-    qualidade = max(1, min(100, qualidade))
+    qualidade = _normalizar_qualidade_jpeg_preview(qualidade_jpeg)
 
     sessao = {
         "session_id": session_id,
         "camera_uid": camera_uid,
+        "temporario": False,
+        "origem": "cadastrada",
         "nome": camera.get("nome"),
         "tipo": abertura.get("tipo"),
         "fonte": abertura.get("fonte"),
@@ -1637,6 +2031,8 @@ def iniciar_preview(
 
     with _PREVIEWS_LOCK:
         _PREVIEWS[session_id] = sessao
+
+    _iniciar_worker_preview(sessao)
 
     return {
         "sucesso": True,
@@ -1664,71 +2060,50 @@ def obter_frame_preview(
         }
 
     with sessao["lock"]:
-        frame = sessao.get("frame_inicial")
+        frame_atual = sessao.get("ultimo_frame")
+        capture_erro = sessao.get("capture_erro")
+        frame_seq = int(sessao.get("frame_seq") or 0)
+        frame = frame_atual.copy() if frame_atual is not None else None
 
-        if frame is not None:
-            sessao["frame_inicial"] = None
-        else:
-            cap = sessao.get("cap")
-
-            if cap is None or not cap.isOpened():
-                return {
-                    "sucesso": False,
-                    "erro": "PREVIEW_INDISPONIVEL",
-                    "session_id": session_id,
-                    "camera_uid": sessao.get(
-                        "camera_uid"
-                    ),
-                }
-
-            try:
-                ret, frame = cap.read()
-            except Exception:
-                ret = False
-                frame = None
-
-            if (
-                not ret
-                or frame is None
-                or frame.size == 0
-            ):
-                return {
-                    "sucesso": False,
-                    "erro": "FRAME_PREVIEW_NAO_RECEBIDO",
-                    "session_id": session_id,
-                    "camera_uid": sessao.get(
-                        "camera_uid"
-                    ),
-                }
-
-        frame_base64 = _encodar_jpeg_base64(
-            frame,
-            sessao.get("qualidade_jpeg", 80),
-        )
-
-        if frame_base64 is None:
-            return {
-                "sucesso": False,
-                "erro": "ERRO_CODIFICAR_FRAME_PREVIEW",
-                "session_id": session_id,
-                "camera_uid": sessao.get(
-                    "camera_uid"
-                ),
-            }
-
-        altura, largura = frame.shape[:2]
-
+    if frame is None or frame.size == 0:
         return {
-            "sucesso": True,
-            "erro": None,
+            "sucesso": False,
+            "erro": capture_erro or "FRAME_PREVIEW_NAO_RECEBIDO",
             "session_id": session_id,
             "camera_uid": sessao.get("camera_uid"),
-            "mime_type": "image/jpeg",
-            "frame_base64": frame_base64,
-            "largura": int(largura),
-            "altura": int(altura),
-            "fps": sessao.get("fps"),
         }
+
+    # A codificação acontece fora do lock da sessão, permitindo que a
+    # captura continue avançando enquanto a resposta HTTP é preparada.
+    frame_base64 = _encodar_jpeg_base64(
+        frame,
+        sessao.get("qualidade_jpeg", 80),
+    )
+
+    if frame_base64 is None:
+        return {
+            "sucesso": False,
+            "erro": "ERRO_CODIFICAR_FRAME_PREVIEW",
+            "session_id": session_id,
+            "camera_uid": sessao.get("camera_uid"),
+        }
+
+    altura, largura = frame.shape[:2]
+
+    return {
+        "sucesso": True,
+        "erro": None,
+        "session_id": session_id,
+        "camera_uid": sessao.get("camera_uid"),
+        "temporario": bool(sessao.get("temporario")),
+        "origem": sessao.get("origem"),
+        "mime_type": "image/jpeg",
+        "frame_base64": frame_base64,
+        "largura": int(largura),
+        "altura": int(altura),
+        "fps": sessao.get("fps"),
+        "frame_seq": frame_seq,
+    }
 
 
 def parar_preview(
@@ -1746,16 +2121,10 @@ def parar_preview(
             "erro": "PREVIEW_NAO_ENCONTRADO",
         }
 
+    _parar_worker_preview(sessao, liberar_capture=True)
+
     with sessao["lock"]:
-        cap = sessao.get("cap")
-
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
-
-        sessao["cap"] = None
+        sessao["ultimo_frame"] = None
         sessao["frame_inicial"] = None
 
     return {
@@ -1763,6 +2132,8 @@ def parar_preview(
         "erro": None,
         "session_id": session_id,
         "camera_uid": sessao.get("camera_uid"),
+        "temporario": bool(sessao.get("temporario")),
+        "origem": sessao.get("origem"),
     }
 
 
@@ -1779,22 +2150,33 @@ def reconectar_preview(
         }
 
     camera_uid = sessao.get("camera_uid")
-    camera = registry_obter_camera(camera_uid)
 
-    if camera is None:
-        return {
-            "sucesso": False,
-            "erro": "CAMERA_NAO_ENCONTRADA",
-            "session_id": session_id,
-        }
+    _parar_worker_preview(sessao, liberar_capture=True)
 
-    abertura = _abrir_capture_preview(
-        camera,
-        timeout_ms=sessao.get(
-            "timeout_ms",
-            3000,
-        ),
-    )
+    if sessao.get("temporario"):
+        if sessao.get("origem") == "usb":
+            abertura = _abrir_capture_preview_temporario_usb(
+                sessao.get("indice_usb")
+            )
+        else:
+            abertura = _abrir_capture_preview_temporario_rede(
+                sessao.get("fonte"),
+                timeout_ms=sessao.get("timeout_ms", 3000),
+            )
+    else:
+        camera = registry_obter_camera(camera_uid)
+
+        if camera is None:
+            return {
+                "sucesso": False,
+                "erro": "CAMERA_NAO_ENCONTRADA",
+                "session_id": session_id,
+            }
+
+        abertura = _abrir_capture_preview(
+            camera,
+            timeout_ms=sessao.get("timeout_ms", 3000),
+        )
 
     if not abertura.get("sucesso"):
         return {
@@ -1805,23 +2187,16 @@ def reconectar_preview(
         }
 
     with sessao["lock"]:
-        cap_antigo = sessao.get("cap")
-
-        if cap_antigo is not None:
-            try:
-                cap_antigo.release()
-            except Exception:
-                pass
-
         sessao["cap"] = abertura["cap"]
         sessao["fonte"] = abertura.get("fonte")
         sessao["tipo"] = abertura.get("tipo")
-        sessao["frame_inicial"] = abertura.get(
-            "frame_inicial"
-        )
+        sessao["frame_inicial"] = abertura.get("frame_inicial")
         sessao["largura"] = abertura.get("largura")
         sessao["altura"] = abertura.get("altura")
         sessao["fps"] = abertura.get("fps")
+        sessao["capture_erro"] = None
+
+    _iniciar_worker_preview(sessao)
 
     return {
         "sucesso": True,
@@ -1840,6 +2215,8 @@ def listar_previews_ativos() -> Dict[str, Any]:
             {
                 "session_id": item.get("session_id"),
                 "camera_uid": item.get("camera_uid"),
+                "temporario": bool(item.get("temporario")),
+                "origem": item.get("origem"),
                 "nome": item.get("nome"),
                 "tipo": item.get("tipo"),
                 "largura": item.get("largura"),

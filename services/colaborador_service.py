@@ -26,6 +26,15 @@ PASTA_BIOMETRIA = getattr(
 
 CAMPOS_CSV = ("Matricula", "Nome", "Cargo", "Setor")
 
+# Referências biométricas oficiais. A frontal mantém o nome legado
+# <matricula>.jpg para não quebrar cadastros e integrações existentes.
+BIOMETRIA_REFERENCIAS = ("frontal", "esquerda", "direita")
+BIOMETRIA_SUFIXOS = {
+    "frontal": "",
+    "esquerda": "__esquerda",
+    "direita": "__direita",
+}
+
 
 def _normalizar_matricula(matricula: Any) -> str:
     return str(matricula or "").strip()
@@ -45,8 +54,58 @@ def _matricula_valida_para_arquivo(matricula: str) -> bool:
     return True
 
 
-def _caminho_biometria(matricula: str) -> str:
-    return os.path.join(PASTA_BIOMETRIA, f"{matricula}.jpg")
+def _caminho_biometria(
+    matricula: str,
+    referencia: str = "frontal",
+) -> str:
+    referencia = str(referencia or "frontal").strip().lower()
+    if referencia not in BIOMETRIA_SUFIXOS:
+        raise ValueError("REFERENCIA_BIOMETRICA_INVALIDA")
+
+    sufixo = BIOMETRIA_SUFIXOS[referencia]
+    return os.path.join(PASTA_BIOMETRIA, f"{matricula}{sufixo}.jpg")
+
+
+def _caminhos_biometria(matricula: str) -> Dict[str, str]:
+    return {
+        referencia: _caminho_biometria(matricula, referencia)
+        for referencia in BIOMETRIA_REFERENCIAS
+    }
+
+
+def _status_referencias_biometricas(matricula: str) -> Dict[str, Any]:
+    caminhos = _caminhos_biometria(matricula)
+    capturas = {
+        referencia: os.path.isfile(caminho)
+        for referencia, caminho in caminhos.items()
+    }
+    quantidade = sum(1 for existe in capturas.values() if existe)
+
+    return {
+        "capturas": capturas,
+        "quantidade_biometrias": quantidade,
+        "biometria_cadastrada": bool(capturas["frontal"]),
+        "biometria_multirreferencia": all(capturas.values()),
+    }
+
+
+def _normalizar_imagens_biometricas(
+    imagem_biometrica=None,
+    imagens_biometricas: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    imagens: Dict[str, Any] = {}
+
+    if isinstance(imagens_biometricas, dict):
+        for referencia in BIOMETRIA_REFERENCIAS:
+            imagem = imagens_biometricas.get(referencia)
+            if imagem is not None:
+                imagens[referencia] = imagem
+
+    # Compatibilidade total com o contrato antigo: imagem_biometrica é frontal.
+    if imagem_biometrica is not None and "frontal" not in imagens:
+        imagens["frontal"] = imagem_biometrica
+
+    return imagens
 
 
 def _garantir_persistencia() -> None:
@@ -166,14 +225,13 @@ def listar_colaboradores() -> Dict[str, Any]:
         for linha in linhas:
             matricula = linha["Matricula"]
             setor = _normalizar_texto(linha.get("Setor"))
+            status_biometria = _status_referencias_biometricas(matricula)
             colaboradores.append({
                 "matricula": matricula,
                 "nome": linha["Nome"],
                 "cargo": linha["Cargo"],
                 "setor": setor or None,
-                "biometria_cadastrada": os.path.isfile(
-                    _caminho_biometria(matricula)
-                ),
+                **status_biometria,
             })
     except Exception as erro:
         return {
@@ -365,7 +423,18 @@ def obter_detalhes_colaborador(matricula: str) -> Dict[str, Any]:
         "colaborador": dict(resultado["colaborador"]),
     }
 
-def validar_captura_facial(imagem) -> Dict[str, Any]:
+def validar_captura_facial(
+    imagem,
+    referencia: str = "frontal",
+) -> Dict[str, Any]:
+    """Valida uma captura biométrica sem alterar os thresholds do reconhecimento.
+
+    O cadastro legado já aceitava a detecção facial com confiança mínima 0.0
+    depois que um detector realmente localizava exatamente um rosto. Aqui
+    preservamos essa regra e usamos fallback de detector apenas quando o
+    OpenCV não consegue localizar o rosto, principalmente nas referências
+    laterais.
+    """
     if (
         imagem is None
         or getattr(imagem, "size", 0) == 0
@@ -378,73 +447,113 @@ def validar_captura_facial(imagem) -> Dict[str, Any]:
             "quantidade_rostos": 0,
             "motivo": "IMAGEM_INVALIDA",
             "confiancas": [],
+            "referencia": referencia,
         }
 
-    try:
-        validacao = validar_imagem_biometrica(
-            imagem=imagem,
-            detector_backend=getattr(
-                config,
-                "BIOMETRIA_DETECTOR_BACKEND",
-                "opencv",
-            ),
-            confianca_minima=float(
-                getattr(
-                    config,
-                    "BIOMETRIA_CONFIANCA_ROSTO_MINIMA",
-                    0.80,
-                )
-            ),
-            dimensao_minima=int(
-                getattr(
-                    config,
-                    "BIOMETRIA_DIMENSAO_ROSTO_MINIMA",
-                    48,
-                )
-            ),
-        )
-    except Exception as erro:
-        return {
-            "sucesso": False,
-            "erro": "ERRO_VALIDAR_BIOMETRIA",
-            "detalhe": str(erro),
-            "captura_valida": False,
-            "quantidade_rostos": 0,
-            "motivo": "ERRO_VALIDAR_BIOMETRIA",
-            "confiancas": [],
-        }
+    referencia = str(referencia or "frontal").strip().lower()
+    if referencia not in BIOMETRIA_REFERENCIAS:
+        referencia = "frontal"
 
-    motivo = str(getattr(validacao, "motivo", "") or "BIOMETRIA_INVALIDA")
-    quantidade = int(getattr(validacao, "quantidade_rostos", 0) or 0)
-    confiancas = [
-        float(valor)
-        for valor in (getattr(validacao, "confiancas", ()) or ())
-    ]
+    detector_preferido = str(
+        getattr(config, "BIOMETRIA_DETECTOR_BACKEND", "opencv") or "opencv"
+    ).strip().lower()
 
-    if bool(getattr(validacao, "valida", False)):
-        return {
-            "sucesso": True,
+    # Primeiro tenta o detector configurado. Para fotos laterais, usa SSD
+    # como fallback leve e RetinaFace somente como último recurso.
+    backends = [detector_preferido]
+    if referencia in {"esquerda", "direita"}:
+        backends.extend(["ssd", "retinaface"])
+    else:
+        backends.append("ssd")
+
+    backends_unicos = []
+    for backend in backends:
+        if backend and backend not in backends_unicos:
+            backends_unicos.append(backend)
+
+    dimensao_minima = int(
+        getattr(config, "BIOMETRIA_DIMENSAO_ROSTO_MINIMA", 48)
+    )
+
+    tentativas = []
+    ultimo_resultado = None
+
+    for backend in backends_unicos:
+        try:
+            validacao = validar_imagem_biometrica(
+                imagem=imagem,
+                detector_backend=backend,
+                # Regra do cadastro legado: depois de um detector achar
+                # exatamente um rosto, não bloquear por score arbitrário.
+                confianca_minima=0.0,
+                dimensao_minima=dimensao_minima,
+            )
+        except Exception as erro:
+            tentativas.append({
+                "detector": backend,
+                "motivo": "ERRO_VALIDAR_BIOMETRIA",
+                "detalhe": str(erro),
+            })
+            continue
+
+        motivo = str(getattr(validacao, "motivo", "") or "BIOMETRIA_INVALIDA")
+        quantidade = int(getattr(validacao, "quantidade_rostos", 0) or 0)
+        confiancas = [
+            float(valor)
+            for valor in (getattr(validacao, "confiancas", ()) or ())
+        ]
+
+        ultimo_resultado = {
+            "sucesso": bool(getattr(validacao, "valida", False)),
             "erro": None,
-            "captura_valida": True,
+            "captura_valida": bool(getattr(validacao, "valida", False)),
             "quantidade_rostos": quantidade,
             "motivo": motivo,
             "confiancas": confiancas,
+            "detector_backend": backend,
+            "referencia": referencia,
         }
 
-    erros_conhecidos = {
-        "DEEPFACE_INDISPONIVEL",
-        "ROSTO_NAO_DETECTADO",
-        "ZERO_ROSTOS_UTILIZAVEIS",
-        "MULTIPLOS_ROSTOS_UTILIZAVEIS",
-    }
+        tentativas.append({
+            "detector": backend,
+            "motivo": motivo,
+            "quantidade_rostos": quantidade,
+        })
+
+        if ultimo_resultado["sucesso"]:
+            ultimo_resultado["tentativas"] = tentativas
+            return ultimo_resultado
+
+        # Se algum detector realmente encontrou mais de um rosto, não
+        # tentamos contornar isso com outro detector. A captura deve ser refeita.
+        if motivo == "MULTIPLOS_ROSTOS_UTILIZAVEIS":
+            ultimo_resultado["erro"] = motivo
+            ultimo_resultado["tentativas"] = tentativas
+            return ultimo_resultado
+
+    if ultimo_resultado is not None:
+        motivo = ultimo_resultado.get("motivo") or "BIOMETRIA_INVALIDA"
+        erros_conhecidos = {
+            "DEEPFACE_INDISPONIVEL",
+            "ROSTO_NAO_DETECTADO",
+            "ZERO_ROSTOS_UTILIZAVEIS",
+            "MULTIPLOS_ROSTOS_UTILIZAVEIS",
+        }
+        ultimo_resultado["erro"] = (
+            motivo if motivo in erros_conhecidos else "BIOMETRIA_INVALIDA"
+        )
+        ultimo_resultado["tentativas"] = tentativas
+        return ultimo_resultado
 
     return {
         "sucesso": False,
-        "erro": motivo if motivo in erros_conhecidos else "BIOMETRIA_INVALIDA",
+        "erro": "ERRO_VALIDAR_BIOMETRIA",
         "captura_valida": False,
-        "quantidade_rostos": quantidade,
-        "motivo": motivo,
-        "confiancas": confiancas,
+        "quantidade_rostos": 0,
+        "motivo": "ERRO_VALIDAR_BIOMETRIA",
+        "confiancas": [],
+        "referencia": referencia,
+        "tentativas": tentativas,
     }
 
 
@@ -452,9 +561,21 @@ def cadastrar_colaborador(
     matricula: str,
     nome: str,
     cargo: str,
-    imagem_biometrica,
+    imagem_biometrica=None,
     setor: Optional[str] = None,
+    imagens_biometricas: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Cadastra colaborador com uma ou três referências biométricas.
+
+    Compatibilidade:
+    - fluxo legado: imagem_biometrica -> salva somente <matricula>.jpg;
+    - fluxo novo: imagens_biometricas com frontal/esquerda/direita -> salva
+      as três referências, todas associadas à mesma matrícula pelo
+      reconhecimento_facial.py.
+
+    Se uma referência lateral for enviada, as duas laterais passam a ser
+    obrigatórias para evitar cadastro multirreferência incompleto.
+    """
     matricula = _normalizar_matricula(matricula)
     nome = _normalizar_texto(nome)
     cargo = _normalizar_texto(cargo)
@@ -472,12 +593,42 @@ def cadastrar_colaborador(
     if not cargo:
         return {"sucesso": False, "erro": "CARGO_OBRIGATORIO", "colaborador": None}
 
-    if imagem_biometrica is None or getattr(imagem_biometrica, "size", 0) == 0:
+    imagens = _normalizar_imagens_biometricas(
+        imagem_biometrica=imagem_biometrica,
+        imagens_biometricas=imagens_biometricas,
+    )
+
+    frontal = imagens.get("frontal")
+    if frontal is None or getattr(frontal, "size", 0) == 0:
         return {
             "sucesso": False,
             "erro": "IMAGEM_BIOMETRICA_OBRIGATORIA",
+            "referencia": "frontal",
             "colaborador": None,
         }
+
+    possui_esquerda = (
+        imagens.get("esquerda") is not None
+        and getattr(imagens.get("esquerda"), "size", 0) > 0
+    )
+    possui_direita = (
+        imagens.get("direita") is not None
+        and getattr(imagens.get("direita"), "size", 0) > 0
+    )
+
+    if possui_esquerda != possui_direita:
+        return {
+            "sucesso": False,
+            "erro": "CAPTURAS_BIOMETRICAS_INCOMPLETAS",
+            "capturas_necessarias": list(BIOMETRIA_REFERENCIAS),
+            "colaborador": None,
+        }
+
+    referencias_salvar = (
+        list(BIOMETRIA_REFERENCIAS)
+        if possui_esquerda and possui_direita
+        else ["frontal"]
+    )
 
     consulta = obter_colaborador(matricula)
 
@@ -497,30 +648,56 @@ def cadastrar_colaborador(
             "colaborador": None,
         }
 
-    caminho_final_biometria = _caminho_biometria(matricula)
+    caminhos_finais = {
+        referencia: _caminho_biometria(matricula, referencia)
+        for referencia in referencias_salvar
+    }
 
-    if os.path.exists(caminho_final_biometria):
+    existentes = [
+        referencia
+        for referencia, caminho in caminhos_finais.items()
+        if os.path.exists(caminho)
+    ]
+    if existentes:
         return {
             "sucesso": False,
             "erro": "BIOMETRIA_JA_EXISTENTE",
             "matricula": matricula,
+            "referencias_existentes": existentes,
             "colaborador": None,
         }
 
-    validacao = validar_captura_facial(imagem_biometrica)
+    validacoes: Dict[str, Dict[str, Any]] = {}
+    for referencia in referencias_salvar:
+        imagem = imagens.get(referencia)
+        if imagem is None or getattr(imagem, "size", 0) == 0:
+            return {
+                "sucesso": False,
+                "erro": "CAPTURA_BIOMETRICA_AUSENTE",
+                "referencia": referencia,
+                "colaborador": None,
+            }
 
-    if not validacao.get("sucesso"):
-        return {
-            "sucesso": False,
-            "erro": "BIOMETRIA_INVALIDA",
-            "motivo_biometria": validacao.get("erro") or validacao.get("motivo"),
-            "validacao_biometria": validacao,
-            "colaborador": None,
-        }
+        validacao = validar_captura_facial(
+            imagem,
+            referencia=referencia,
+        )
+        validacoes[referencia] = validacao
 
-    caminho_imagem_temporaria = None
+        if not validacao.get("sucesso"):
+            return {
+                "sucesso": False,
+                "erro": "BIOMETRIA_INVALIDA",
+                "referencia": referencia,
+                "motivo_biometria": validacao.get("erro") or validacao.get("motivo"),
+                "validacao_biometria": validacao,
+                "validacoes_biometricas": validacoes,
+                "colaborador": None,
+            }
+
+    caminhos_temporarios: Dict[str, str] = {}
+    caminhos_promovidos: List[str] = []
     caminho_csv_temporario = None
-    imagem_promovida = False
 
     try:
         linhas = _ler_linhas_csv()
@@ -541,37 +718,41 @@ def cadastrar_colaborador(
             "Setor": setor,
         })
 
-        caminho_imagem_temporaria = _criar_imagem_temporaria(
-            matricula,
-            imagem_biometrica,
-        )
+        # Primeiro prepara todos os arquivos temporários. Nada oficial é
+        # alterado até todas as imagens e o CSV estarem prontos.
+        for referencia in referencias_salvar:
+            caminhos_temporarios[referencia] = _criar_imagem_temporaria(
+                f"{matricula}_{referencia}",
+                imagens[referencia],
+            )
+
         caminho_csv_temporario = _criar_csv_temporario(linhas)
 
-        os.replace(caminho_imagem_temporaria, caminho_final_biometria)
-        imagem_promovida = True
-        caminho_imagem_temporaria = None
+        # Promove as referências biométricas e, por último, o CSV.
+        for referencia in referencias_salvar:
+            temporario = caminhos_temporarios.pop(referencia)
+            final = caminhos_finais[referencia]
+            os.replace(temporario, final)
+            caminhos_promovidos.append(final)
 
         os.replace(caminho_csv_temporario, ARQUIVO_CSV)
         caminho_csv_temporario = None
 
     except Exception as erro:
-        _remover_temporario(caminho_imagem_temporaria)
+        for temporario in caminhos_temporarios.values():
+            _remover_temporario(temporario)
         _remover_temporario(caminho_csv_temporario)
 
-        if imagem_promovida:
+        for caminho in caminhos_promovidos:
             try:
-                if os.path.exists(caminho_final_biometria):
-                    os.remove(caminho_final_biometria)
+                if os.path.exists(caminho):
+                    os.remove(caminho)
             except OSError:
                 pass
 
         return {
             "sucesso": False,
-            "erro": (
-                "ERRO_SALVAR_COLABORADOR"
-                if imagem_promovida
-                else "ERRO_SALVAR_BIOMETRIA"
-            ),
+            "erro": "ERRO_SALVAR_COLABORADOR",
             "detalhe": str(erro),
             "colaborador": None,
         }
@@ -590,6 +771,8 @@ def cadastrar_colaborador(
         "sucesso": True,
         "erro": None,
         "colaborador": resultado["colaborador"],
+        "referencias_biometricas": referencias_salvar,
+        "validacoes_biometricas": validacoes,
     }
 
 
@@ -602,6 +785,9 @@ def obter_status_biometria(matricula: str) -> Dict[str, Any]:
             "erro": "MATRICULA_OBRIGATORIA",
             "matricula": None,
             "biometria_cadastrada": False,
+            "quantidade_biometrias": 0,
+            "biometria_multirreferencia": False,
+            "capturas": {},
         }
 
     colaborador = obter_colaborador(matricula)
@@ -612,13 +798,18 @@ def obter_status_biometria(matricula: str) -> Dict[str, Any]:
             "erro": colaborador.get("erro"),
             "matricula": matricula,
             "biometria_cadastrada": False,
+            "quantidade_biometrias": 0,
+            "biometria_multirreferencia": False,
+            "capturas": {},
         }
+
+    status = _status_referencias_biometricas(matricula)
 
     return {
         "sucesso": True,
         "erro": None,
         "matricula": matricula,
-        "biometria_cadastrada": os.path.isfile(_caminho_biometria(matricula)),
+        **status,
     }
 
 
@@ -696,11 +887,13 @@ def atualizar_biometria_colaborador(
             "biometria_cadastrada": os.path.isfile(caminho_final),
         }
 
+    status = _status_referencias_biometricas(matricula)
+
     return {
         "sucesso": True,
         "erro": None,
         "matricula": matricula,
-        "biometria_cadastrada": True,
+        **status,
     }
 
 
@@ -816,18 +1009,7 @@ def editar_colaborador(
 
 
 def remover_colaborador(matricula: str) -> Dict[str, Any]:
-    """
-    Remove o cadastro do colaborador e sua biometria oficial.
-
-    Regras:
-    - não verifica vínculos com ambientes; essa proteção é feita pela camada
-      HTTP, que já possui acesso ao ambiente_service sem criar dependência
-      circular entre services;
-    - não remove incidentes, evidências ou históricos externos;
-    - a matrícula é imutável e usada apenas para localizar o cadastro;
-    - se a remoção da biometria falhar após a troca do CSV, o CSV anterior é
-      restaurado para evitar um estado parcial.
-    """
+    """Remove o colaborador e todas as referências biométricas da matrícula."""
     matricula = _normalizar_matricula(matricula)
 
     if not matricula:
@@ -854,12 +1036,17 @@ def remover_colaborador(matricula: str) -> Dict[str, Any]:
         }
 
     colaborador_removido = dict(atual.get("colaborador") or {})
-    caminho_biometria = _caminho_biometria(matricula)
-    biometria_existia = os.path.isfile(caminho_biometria)
+    caminhos_biometria = _caminhos_biometria(matricula)
+    existentes = {
+        referencia: caminho
+        for referencia, caminho in caminhos_biometria.items()
+        if os.path.isfile(caminho)
+    }
 
     caminho_csv_novo = None
     caminho_csv_backup = None
     csv_substituido = False
+    backups_biometria: Dict[str, tuple[str, str]] = {}
 
     try:
         linhas = _ler_linhas_csv()
@@ -876,22 +1063,46 @@ def remover_colaborador(matricula: str) -> Dict[str, Any]:
                 "matricula": matricula,
             }
 
-        # Mantém uma cópia transacional do estado anterior do CSV.
         caminho_csv_backup = _criar_csv_temporario(linhas)
         caminho_csv_novo = _criar_csv_temporario(linhas_restantes)
+
+        # Retira as biometrias oficiais do caminho reconhecido sem apagá-las
+        # ainda. Isso permite rollback completo se o CSV falhar.
+        for referencia, caminho_original in existentes.items():
+            descritor, caminho_backup = tempfile.mkstemp(
+                prefix=f".{matricula}_{referencia}_remocao_",
+                suffix=".jpg.bak",
+                dir=PASTA_BIOMETRIA,
+            )
+            os.close(descritor)
+            os.remove(caminho_backup)
+            os.replace(caminho_original, caminho_backup)
+            backups_biometria[referencia] = (caminho_original, caminho_backup)
 
         os.replace(caminho_csv_novo, ARQUIVO_CSV)
         caminho_csv_novo = None
         csv_substituido = True
 
-        if biometria_existia:
-            os.remove(caminho_biometria)
+        # Commit: CSV novo já está ativo; agora os backups biométricos podem
+        # ser apagados definitivamente.
+        for _, caminho_backup in backups_biometria.values():
+            if os.path.exists(caminho_backup):
+                os.remove(caminho_backup)
+        backups_biometria.clear()
 
     except Exception as erro:
         _remover_temporario(caminho_csv_novo)
 
         rollback_sucesso = True
-        rollback_detalhe = None
+        detalhes_rollback = []
+
+        for caminho_original, caminho_backup in backups_biometria.values():
+            try:
+                if os.path.exists(caminho_backup):
+                    os.replace(caminho_backup, caminho_original)
+            except Exception as erro_rollback:
+                rollback_sucesso = False
+                detalhes_rollback.append(str(erro_rollback))
 
         if csv_substituido and caminho_csv_backup:
             try:
@@ -899,7 +1110,7 @@ def remover_colaborador(matricula: str) -> Dict[str, Any]:
                 caminho_csv_backup = None
             except Exception as erro_rollback:
                 rollback_sucesso = False
-                rollback_detalhe = str(erro_rollback)
+                detalhes_rollback.append(str(erro_rollback))
 
         _remover_temporario(caminho_csv_backup)
 
@@ -908,7 +1119,7 @@ def remover_colaborador(matricula: str) -> Dict[str, Any]:
             "erro": "ERRO_REMOVER_COLABORADOR",
             "detalhe": str(erro),
             "rollback_sucesso": rollback_sucesso,
-            "rollback_detalhe": rollback_detalhe,
+            "rollback_detalhe": "; ".join(detalhes_rollback) or None,
             "matricula": matricula,
         }
 
@@ -919,9 +1130,12 @@ def remover_colaborador(matricula: str) -> Dict[str, Any]:
         "erro": None,
         "matricula": matricula,
         "colaborador_removido": colaborador_removido,
-        "biometria_removida": biometria_existia,
+        "biometria_removida": bool(existentes),
+        "quantidade_biometrias_removidas": len(existentes),
+        "referencias_biometricas_removidas": list(existentes.keys()),
         "historico_preservado": True,
     }
+
 
 def obter_imagem_colaborador(matricula: str) -> Dict[str, Any]:
     """
@@ -987,6 +1201,7 @@ def obter_imagem_colaborador(matricula: str) -> Dict[str, Any]:
             "sucesso": True,
             "erro": None,
             "matricula": matricula,
+            "referencia": "frontal",
             "mime_type": "image/jpeg",
             "largura": largura,
             "altura": altura,

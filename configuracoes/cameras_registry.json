@@ -1,0 +1,78 @@
+{
+    "schema_version": 1,
+    "cameras": [
+        {
+            "camera_uid": "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c",
+            "nome": "Celular 1",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://10.141.170.79:8554/",
+                "host": "10.141.170.79",
+                "porta": 8554,
+                "caminho_stream": "/",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {},
+            "metadata": {
+                "criado_em": "2026-09-22T22:47:20.455789+00:00",
+                "atualizado_em": "2026-09-22T22:47:20.455789+00:00"
+            }
+        },
+        {
+            "camera_uid": "72c611a3-3ae6-4b77-a3fa-ff96e89518cf",
+            "nome": "Sala 1",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://admin:Fiap.123@10.20.93.82:554/cam/realmonitor?channel=1&subtype=0",
+                "host": "10.20.93.82",
+                "porta": 554,
+                "caminho_stream": "/cam/realmonitor?channel=1&subtype=0",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {},
+            "metadata": {
+                "criado_em": "2026-09-22T23:44:33.292378+00:00",
+                "atualizado_em": "2026-09-22T23:44:33.292378+00:00"
+            }
+        },
+        {
+            "camera_uid": "b39a10a8-6da0-4793-b45c-a52e11c62fb8",
+            "nome": "Sala 2",
+            "tipo": "rtsp",
+            "identidade": {
+                "tipo": "camera_rede_logica"
+            },
+            "conexao": {
+                "fonte": "rtsp://admin:Fiap.123@10.20.93.84:554/cam/realmonitor?channel=1&subtype=0",
+                "host": "10.20.93.84",
+                "porta": 554,
+                "caminho_stream": "/cam/realmonitor?channel=1&subtype=0",
+                "tipo_stream": "rtsp",
+                "onvif": false,
+                "resolucao": null,
+                "fps": null
+            },
+            "compatibilidade": {},
+            "metadata": {
+                "criado_em": "2026-09-22T23:45:21.823873+00:00",
+                "atualizado_em": "2026-09-22T23:45:21.823873+00:00"
+            }
+        }
+    ],
+    "metadata": {
+        "criado_em": "2026-09-21T23:26:52.407770+00:00",
+        "atualizado_em": "2026-09-22T23:45:21.825877+00:00"
+    }
+}

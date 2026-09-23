@@ -1,0 +1,223 @@
+{
+    "schema_version": 6,
+    "ambiente_id": "1c23d1e6-c26d-4246-94cb-7f582e1e58d1",
+    "nome": "Teste",
+    "descricao": "Teste",
+    "foto_ambiente": "",
+    "calibrado": true,
+    "cameras": [
+        {
+            "camera_uid": "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c",
+            "tipo": "rtsp",
+            "nome": "Celular 1"
+        }
+    ],
+    "epis_obrigatorios": [
+        "Capacete"
+    ],
+    "objetos_globais": {
+        "OBJETO_001": {
+            "id": "OBJETO_001",
+            "numero": 1,
+            "nome": "Objeto 1",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    154,
+                    442,
+                    372,
+                    570
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_002": {
+            "id": "OBJETO_002",
+            "numero": 2,
+            "nome": "Objeto 2",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    570,
+                    442,
+                    960,
+                    740
+                ]
+            },
+            "maquinario": true
+        },
+        "OBJETO_003": {
+            "id": "OBJETO_003",
+            "numero": 3,
+            "nome": "Objeto 3",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    268,
+                    466,
+                    338,
+                    600
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_004": {
+            "id": "OBJETO_004",
+            "numero": 4,
+            "nome": "Objeto 4",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    332,
+                    481,
+                    446,
+                    791
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_005": {
+            "id": "OBJETO_005",
+            "numero": 5,
+            "nome": "Objeto 5",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    436,
+                    520,
+                    497,
+                    676
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_006": {
+            "id": "OBJETO_006",
+            "numero": 6,
+            "nome": "Objeto 6",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    221,
+                    671,
+                    336,
+                    753
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_007": {
+            "id": "OBJETO_007",
+            "numero": 7,
+            "nome": "Objeto 7",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    65,
+                    701,
+                    530,
+                    1182
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_008": {
+            "id": "OBJETO_008",
+            "numero": 8,
+            "nome": "Objeto 8",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    522,
+                    718,
+                    761,
+                    827
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_009": {
+            "id": "OBJETO_009",
+            "numero": 9,
+            "nome": "Objeto 9",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    350,
+                    755,
+                    797,
+                    1080
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_010": {
+            "id": "OBJETO_010",
+            "numero": 10,
+            "nome": "Objeto 10",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    401,
+                    911,
+                    958,
+                    1269
+                ]
+            },
+            "maquinario": false
+        },
+        "OBJETO_011": {
+            "id": "OBJETO_011",
+            "numero": 11,
+            "nome": "Objeto 11",
+            "cameras": [
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c"
+            ],
+            "deteccoes": {
+                "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": [
+                    224,
+                    945,
+                    444,
+                    1096
+                ]
+            },
+            "maquinario": false
+        }
+    },
+    "rois": {
+        "7d3528ed-2e88-4dfb-bb7d-4b8e71dba65c": {
+            "x1": 0.06666666666666667,
+            "y1": 0.34453125,
+            "x2": 1.0,
+            "y2": 0.9921875
+        }
+    },
+    "colaboradores_vinculados": [
+        "5743267"
+    ],
+    "metadata": {
+        "criado_em": "2026-09-22T22:48:55.659630+00:00",
+        "atualizado_em": "2026-09-22T22:54:36.541964+00:00",
+        "origem": "novo"
+    }
+}

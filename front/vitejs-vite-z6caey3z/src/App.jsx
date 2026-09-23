@@ -37,6 +37,8 @@ import {
   X,
 } from 'lucide-react';
 
+import { ambientesApi, camerasApi, colaboradoresApi, mensagemApi, setApiContext } from './api.js';
+
 // ==========================================
 // 1. LOGO CODESPHERE (SVG Vetorial)
 // ==========================================
@@ -281,47 +283,186 @@ export default function App() {
 
   // Estados dos dados
   const [cameras, setCameras] = useState([]);
+  const [camerasLoading, setCamerasLoading] = useState(false);
+  const [camerasErro, setCamerasErro] = useState(null);
   const [ambientes, setAmbientes] = useState([]);
+  const [ambientesLoading, setAmbientesLoading] = useState(false);
+  const [ambientesErro, setAmbientesErro] = useState(null);
   const [colaboradores, setColaboradores] = useState([]);
+  const [colaboradoresLoading, setColaboradoresLoading] = useState(false);
+  const [colaboradoresErro, setColaboradoresErro] = useState(null);
   const [ocorrencias, setOcorrencias] = useState([]);
 
   // Estado para armazenar o ambiente sendo editado
   const [ambienteEmEdicao, setAmbienteEmEdicao] = useState(null);
 
-  // Ações de Ambientes
-  const handleSalvarAmbiente = (ambienteData) => {
-    if (ambienteEmEdicao) {
-      setAmbientes((prev) =>
-        prev.map((a) =>
-          a.id === ambienteEmEdicao.id
-            ? { ...ambienteData, id: ambienteEmEdicao.id }
-            : a
-        )
-      );
-      setAmbienteEmEdicao(null);
-      alert('Ambiente atualizado com sucesso!');
-    } else {
-      setAmbientes((prev) => [...prev, { ...ambienteData, id: Date.now() }]);
-      alert('Ambiente cadastrado com sucesso!');
+  // Integração real com a API de câmeras.
+  const carregarCameras = async () => {
+    setCamerasLoading(true);
+    setCamerasErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const dados = await camerasApi.listar();
+      setCameras(Array.isArray(dados.cameras) ? dados.cameras : []);
+    } catch (error) {
+      setCameras([]);
+      setCamerasErro(mensagemApi(error));
+    } finally {
+      setCamerasLoading(false);
     }
+  };
+
+  useEffect(() => {
+    if (!currentUser) return;
+    void carregarCameras();
+  }, [currentUser]);
+
+  // Integração real com a API de Ambientes.
+  const carregarAmbientes = async () => {
+    setAmbientesLoading(true);
+    setAmbientesErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const dados = await ambientesApi.listar({ pagina: 1, por_pagina: 200 });
+      setAmbientes(Array.isArray(dados.ambientes) ? dados.ambientes : []);
+    } catch (error) {
+      setAmbientes([]);
+      setAmbientesErro(mensagemApi(error));
+    } finally {
+      setAmbientesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!currentUser) return;
+    void carregarAmbientes();
+  }, [currentUser]);
+
+  // Ações de Ambientes — persistidas no backend real.
+  const handleSalvarAmbiente = async (ambienteData) => {
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+
+      if (ambienteEmEdicao?.ambiente_id) {
+        await ambientesApi.editar(ambienteEmEdicao.ambiente_id, ambienteData);
+        alert('Ambiente atualizado com sucesso!');
+      } else {
+        await ambientesApi.criar(ambienteData);
+        alert('Ambiente cadastrado com sucesso!');
+      }
+
+      setAmbienteEmEdicao(null);
+      await carregarAmbientes();
+      setActiveScreen('consulta-ambientes');
+      return { sucesso: true, erro: null };
+    } catch (error) {
+      return { sucesso: false, erro: mensagemApi(error) };
+    }
+  };
+
+  const handleConcluirFluxoAmbiente = async () => {
+    setAmbienteEmEdicao(null);
+    await carregarAmbientes();
     setActiveScreen('consulta-ambientes');
   };
 
-  const handleIniciarEdicaoAmbiente = (ambiente) => {
-    setAmbienteEmEdicao(ambiente);
-    setActiveScreen('cadastro-ambiente');
-  };
+  const handleIniciarEdicaoAmbiente = async (ambiente) => {
+    const ambienteId = ambiente?.ambiente_id;
+    if (!ambienteId) return;
 
-  const handleDeletarAmbiente = (id) => {
-    setAmbientes((prev) => prev.filter((a) => a.id !== id));
-    if (ambienteEmEdicao?.id === id) {
-      setAmbienteEmEdicao(null);
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const detalhes = await ambientesApi.detalhes(ambienteId);
+      setAmbienteEmEdicao(detalhes);
+      setActiveScreen('cadastro-ambiente');
+    } catch (error) {
+      alert(mensagemApi(error));
     }
   };
 
-  // Ações de Colaboradores
-  const handleDeletarColaborador = (id) => {
-    setColaboradores((prev) => prev.filter((c) => c.id !== id));
+  const handleDeletarAmbiente = async (ambienteId) => {
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      await ambientesApi.remover(ambienteId);
+
+      if (ambienteEmEdicao?.ambiente_id === ambienteId) {
+        setAmbienteEmEdicao(null);
+      }
+
+      await carregarAmbientes();
+      return { sucesso: true, erro: null };
+    } catch (error) {
+      return { sucesso: false, erro: mensagemApi(error) };
+    }
+  };
+
+  // Integração real com a API de Colaboradores.
+  const carregarColaboradores = async () => {
+    setColaboradoresLoading(true);
+    setColaboradoresErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+
+      const dados = await colaboradoresApi.listar({
+        pagina: 1,
+        por_pagina: 200,
+      });
+
+      const base = Array.isArray(dados.colaboradores)
+        ? dados.colaboradores
+        : [];
+
+      // A foto frontal é buscada apenas quando existe biometria.
+      // Falha ao carregar uma miniatura não remove o colaborador da lista.
+      const enriquecidos = await Promise.all(
+        base.map(async (colaborador) => {
+          let foto = null;
+
+          if (colaborador?.biometria_cadastrada && colaborador?.matricula) {
+            try {
+              const imagem = await colaboradoresApi.imagem(colaborador.matricula);
+              if (imagem?.imagem_base64) {
+                foto = `data:${imagem.mime_type || 'image/jpeg'};base64,${imagem.imagem_base64}`;
+              }
+            } catch {
+              foto = null;
+            }
+          }
+
+          return {
+            ...colaborador,
+            id: colaborador.matricula,
+            foto,
+          };
+        })
+      );
+
+      setColaboradores(enriquecidos);
+    } catch (error) {
+      setColaboradores([]);
+      setColaboradoresErro(mensagemApi(error));
+    } finally {
+      setColaboradoresLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!currentUser) return;
+    void carregarColaboradores();
+  }, [currentUser]);
+
+  const handleDeletarColaborador = async (matricula) => {
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      await colaboradoresApi.remover(matricula);
+      await carregarColaboradores();
+      return { sucesso: true, erro: null };
+    } catch (error) {
+      return { sucesso: false, erro: mensagemApi(error) };
+    }
   };
 
   // Relógio do Sistema
@@ -639,8 +780,8 @@ export default function App() {
 
           {activeScreen === 'cadastro-cameras' && (
             <CadastroCamerasView
-              onCadastrar={(novaCam) => {
-                setCameras((prev) => [...prev, novaCam]);
+              onCadastrar={async () => {
+                await carregarCameras();
                 alert('Câmera registrada com sucesso!');
               }}
             />
@@ -649,12 +790,21 @@ export default function App() {
           {activeScreen === 'consulta-cameras' && (
             <ConsultaCamerasView
               cameras={cameras}
+              loading={camerasLoading}
+              erro={camerasErro}
+              onRefresh={carregarCameras}
               onNavigate={setActiveScreen}
             />
           )}
 
           {activeScreen === 'teste-cameras' && (
-            <TesteCamerasView cameras={cameras} onNavigate={setActiveScreen} />
+            <TesteCamerasView
+              cameras={cameras}
+              loading={camerasLoading}
+              erro={camerasErro}
+              onRefresh={carregarCameras}
+              onNavigate={setActiveScreen}
+            />
           )}
 
           {/* Cadastro e Edição de Ambientes */}
@@ -663,6 +813,7 @@ export default function App() {
               ambienteEmEdicao={ambienteEmEdicao}
               camerasDisponiveis={cameras}
               onSalvarAmbiente={handleSalvarAmbiente}
+              onConcluirAmbiente={handleConcluirFluxoAmbiente}
               onCancelarEdicao={() => {
                 setAmbienteEmEdicao(null);
                 setActiveScreen('consulta-ambientes');
@@ -674,6 +825,9 @@ export default function App() {
           {activeScreen === 'consulta-ambientes' && (
             <ConsultaAmbientesView
               ambientes={ambientes}
+              loading={ambientesLoading}
+              erro={ambientesErro}
+              onRefresh={carregarAmbientes}
               onEditarAmbiente={handleIniciarEdicaoAmbiente}
               onDeletarAmbiente={handleDeletarAmbiente}
               onNavigate={setActiveScreen}
@@ -684,6 +838,9 @@ export default function App() {
           {activeScreen === 'consulta-colaboradores' && (
             <ConsultaColaboradoresView
               colaboradores={colaboradores}
+              loading={colaboradoresLoading}
+              erro={colaboradoresErro}
+              onRefresh={carregarColaboradores}
               onDeletarColaborador={handleDeletarColaborador}
               onNavigate={setActiveScreen}
             />
@@ -691,8 +848,10 @@ export default function App() {
 
           {activeScreen === 'cadastro-colaborador' && (
             <CadastroColaboradorView
-              onCadastrarColaborador={(novoColab) => {
-                setColaboradores((prev) => [...prev, novoColab]);
+              cameras={cameras}
+              camerasLoading={camerasLoading}
+              onCadastrarColaborador={async () => {
+                await carregarColaboradores();
                 alert('Colaborador cadastrado com sucesso!');
                 setActiveScreen('consulta-colaboradores');
               }}
@@ -864,264 +1023,1134 @@ function DashboardEmptyView({
 // 2. CADASTRO DE CÂMERAS
 function CadastroCamerasView({ onCadastrar }) {
   const [nome, setNome] = useState('');
-  const [ip, setIp] = useState('');
-  const [protocolo, setProtocolo] = useState('RTSP');
-  const [urlStream, setUrlStream] = useState('rtsp://192.168.0.4:8554/');
-  const [usuario, setUsuario] = useState('admin');
+  const [usuario, setUsuario] = useState('');
   const [senha, setSenha] = useState('');
+  const [mostrarSenha, setMostrarSenha] = useState(false);
   const [testando, setTestando] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [buscando, setBuscando] = useState(false);
   const [statusConexao, setStatusConexao] = useState(null);
+  const [resultadoTeste, setResultadoTeste] = useState(null);
+  const [candidatos, setCandidatos] = useState([]);
+  const [candidatoSelecionado, setCandidatoSelecionado] = useState(null);
+  const [redeDetectada, setRedeDetectada] = useState(null);
 
-  const handleTestar = async () => {
-    setTestando(true);
-    setStatusConexao(null);
+  const [previewSessionId, setPreviewSessionId] = useState(null);
+  const [frameSrc, setFrameSrc] = useState(null);
+  const [previewInfo, setPreviewInfo] = useState(null);
+  const [previewErro, setPreviewErro] = useState(null);
+  const previewSessionRef = React.useRef(null);
+  const previewBoxRef = React.useRef(null);
+
+  const [manualNome, setManualNome] = useState('');
+  const [manualIp, setManualIp] = useState('');
+  const [manualUrl, setManualUrl] = useState('');
+  const [manualUsuario, setManualUsuario] = useState('');
+  const [manualSenha, setManualSenha] = useState('');
+  const [mostrarSenhaManual, setMostrarSenhaManual] = useState(false);
+  const [manualTestando, setManualTestando] = useState(false);
+  const [manualSalvando, setManualSalvando] = useState(false);
+  const [manualStatus, setManualStatus] = useState(null);
+  const [manualResultado, setManualResultado] = useState(null);
+  const [previewContexto, setPreviewContexto] = useState(null);
+
+  const pararPreviewTemporario = async () => {
+    const sessionId = previewSessionRef.current;
+    previewSessionRef.current = null;
+    setPreviewSessionId(null);
+
+    if (!sessionId) {
+      setFrameSrc(null);
+      setPreviewInfo(null);
+      setPreviewErro(null);
+      setPreviewContexto(null);
+      return;
+    }
 
     try {
-      const resposta = await fetch(
-        'https://whole-olympic-amounts-scientists.trycloudflare.com/api/front/cameras/testar',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            fonte: urlStream,
-            usuario,
-            senha,
-          }),
-        }
-      );
-
-      const dados = await resposta.json();
-
-      if (dados.sucesso) {
-        setStatusConexao('sucesso');
-      } else {
-        setStatusConexao('erro');
-        alert(`Erro: ${dados.erro}`);
+      await camerasApi.pararPreview(sessionId);
+    } catch (error) {
+      if (error?.payload?.erro !== 'PREVIEW_NAO_ENCONTRADO') {
+        setPreviewErro(mensagemApi(error));
       }
-    } catch {
+    } finally {
+      setFrameSrc(null);
+      setPreviewInfo(null);
+      setPreviewContexto(null);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      const sessionId = previewSessionRef.current;
+      if (sessionId) {
+        void camerasApi.pararPreview(sessionId).catch(() => {});
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!previewSessionId) return undefined;
+
+    let cancelado = false;
+    let executando = false;
+
+    const atualizarFrame = async () => {
+      if (cancelado || executando) return;
+      executando = true;
+
+      try {
+        const dados = await camerasApi.obterFramePreview(previewSessionId);
+
+        if (!cancelado && dados?.frame_base64) {
+          setFrameSrc(
+            `data:${dados.mime_type || 'image/jpeg'};base64,${dados.frame_base64}`
+          );
+          setPreviewInfo((anterior) => ({ ...anterior, ...dados }));
+          setPreviewErro(null);
+        }
+      } catch (error) {
+        if (!cancelado) {
+          setPreviewErro(mensagemApi(error));
+        }
+      } finally {
+        executando = false;
+      }
+    };
+
+    void atualizarFrame();
+    const timer = window.setInterval(atualizarFrame, 300);
+
+    return () => {
+      cancelado = true;
+      window.clearInterval(timer);
+    };
+  }, [previewSessionId]);
+
+  const limparTesteSelecionada = () => {
+    setStatusConexao(null);
+    setResultadoTeste(null);
+    setPreviewErro(null);
+  };
+
+  const limparTesteManual = () => {
+    setManualStatus(null);
+    setManualResultado(null);
+    setPreviewErro(null);
+  };
+
+  const protocoloCandidato = (item) => {
+    if (!item) return '-';
+    if (item.origem === 'usb') return 'USB';
+
+    const candidato = item.candidato || {};
+    const protocolos = Array.isArray(candidato.protocolos)
+      ? candidato.protocolos.filter(Boolean)
+      : [];
+
+    return (
+      protocolos.join('/') ||
+      candidato.protocolo ||
+      candidato.tipo ||
+      'REDE'
+    );
+  };
+
+  const portasCandidato = (item) => {
+    if (!item || item.origem === 'usb') return '-';
+    const portas = item.candidato?.portas;
+    return Array.isArray(portas) && portas.length ? portas.join(', ') : '-';
+  };
+
+  const nomeCandidato = (item, index = 0) => {
+    if (!item) return 'Câmera';
+    if (item.origem === 'usb') {
+      return item.nome_dispositivo || `Câmera USB ${item.indice ?? index}`;
+    }
+
+    const candidato = item.candidato || {};
+    return (
+      candidato.nome_onvif ||
+      candidato.nome ||
+      candidato.ip ||
+      `Câmera de rede ${index + 1}`
+    );
+  };
+
+  const selecionarCandidato = async (item) => {
+    await pararPreviewTemporario();
+    setCandidatoSelecionado(item);
+    limparTesteSelecionada();
+    setManualStatus(null);
+
+    if (item.origem === 'usb') {
+      setNome(item.nome_dispositivo || 'Câmera USB');
+      setUsuario('');
+      setSenha('');
+      return;
+    }
+
+    const candidato = item.candidato || {};
+    setNome(candidato.nome_onvif || candidato.nome || '');
+    setUsuario('');
+    setSenha('');
+  };
+
+  const handleBuscar = async () => {
+    setBuscando(true);
+    setCandidatos([]);
+    setCandidatoSelecionado(null);
+    setRedeDetectada(null);
+    limparTesteSelecionada();
+    await pararPreviewTemporario();
+
+    try {
+      const [rede, usb] = await Promise.allSettled([
+        camerasApi.buscarRede(),
+        camerasApi.buscarUsb(),
+      ]);
+
+      const encontrados = [];
+
+      if (rede.status === 'fulfilled') {
+        setRedeDetectada(rede.value.rede || null);
+        const itens = rede.value.candidatos || rede.value.cameras || [];
+
+        itens.forEach((candidato) => {
+          encontrados.push({ origem: 'rede', candidato });
+        });
+      }
+
+      if (usb.status === 'fulfilled') {
+        (usb.value.cameras || []).forEach((camera) => {
+          encontrados.push({ origem: 'usb', ...camera });
+        });
+      }
+
+      setCandidatos(encontrados);
+
+      if (!encontrados.length) {
+        alert('Nenhuma câmera foi encontrada. Você pode adicioná-la manualmente abaixo.');
+      }
+    } catch (error) {
+      alert(mensagemApi(error));
+    } finally {
+      setBuscando(false);
+    }
+  };
+
+  const iniciarPreviewComRetry = async (payload) => {
+    try {
+      return await camerasApi.iniciarPreviewTemporario(payload);
+    } catch (error) {
+      const codigo = error?.payload?.erro || error?.message;
+      if (!['STREAM_INDISPONIVEL', 'CAMERA_INDISPONIVEL'].includes(codigo)) {
+        throw error;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+      return camerasApi.iniciarPreviewTemporario(payload);
+    }
+  };
+
+  const handleTestarSelecionada = async () => {
+    if (!candidatoSelecionado) {
+      alert('Selecione uma câmera encontrada primeiro.');
+      return;
+    }
+
+    setTestando(true);
+    limparTesteSelecionada();
+    await pararPreviewTemporario();
+
+    try {
+      let teste;
+      let payloadPreview;
+
+      if (candidatoSelecionado.origem === 'usb') {
+        teste = await camerasApi.testarUsb(candidatoSelecionado.indice);
+        payloadPreview = {
+          indice_usb: candidatoSelecionado.indice,
+          nome: nome.trim() || candidatoSelecionado.nome_dispositivo || 'Câmera USB',
+          qualidade_jpeg: 82,
+        };
+      } else {
+        teste = await camerasApi.testarRede({
+          candidato: candidatoSelecionado.candidato,
+          usuario: usuario || null,
+          senha: senha || null,
+        });
+
+        payloadPreview = {
+          fonte: teste?.fonte || undefined,
+          candidato: teste?.fonte ? undefined : candidatoSelecionado.candidato,
+          usuario: usuario || null,
+          senha: senha || null,
+          nome: nome.trim() || nomeCandidato(candidatoSelecionado),
+          qualidade_jpeg: 82,
+        };
+      }
+
+      const preview = await iniciarPreviewComRetry(payloadPreview);
+
+      previewSessionRef.current = preview.session_id;
+      setPreviewSessionId(preview.session_id);
+      setPreviewInfo({ ...teste, ...preview });
+      setResultadoTeste({ ...teste, ...preview, fonte: teste?.fonte });
+      setStatusConexao('sucesso');
+      setPreviewContexto('selecionada');
+
+      if (teste?.nome_dispositivo && !nome.trim()) {
+        setNome(teste.nome_dispositivo);
+      }
+    } catch (error) {
       setStatusConexao('erro');
-      alert('Backend não conectado.');
+      setPreviewErro(mensagemApi(error));
     } finally {
       setTestando(false);
     }
   };
 
-  const handleSalvar = (e) => {
-    e.preventDefault();
-    if (!nome) return;
-    onCadastrar({
-      id: Date.now(),
-      nome,
-      ip: ip || '192.168.0.20',
-      protocolo,
-      urlStream,
-      status: 'Online',
-    });
+  const resetarSelecionada = async () => {
+    await pararPreviewTemporario();
     setNome('');
-    setIp('');
-    setUrlStream('');
-    setStatusConexao(null);
+    setUsuario('');
+    setSenha('');
+    setMostrarSenha(false);
+    setCandidatoSelecionado(null);
+    limparTesteSelecionada();
   };
 
+  const handleSalvarSelecionada = async () => {
+    if (!candidatoSelecionado) {
+      alert('Selecione uma câmera encontrada.');
+      return;
+    }
+
+    if (!nome.trim()) {
+      alert('Informe o nome da câmera.');
+      return;
+    }
+
+    if (statusConexao !== 'sucesso') {
+      alert('Teste a conexão com sucesso antes de cadastrar.');
+      return;
+    }
+
+    setSalvando(true);
+
+    try {
+      if (candidatoSelecionado.origem === 'usb') {
+        await camerasApi.cadastrarUsb({
+          indice: candidatoSelecionado.indice,
+          nome: nome.trim(),
+        });
+      } else {
+        const candidato = candidatoSelecionado.candidato || {};
+        const fonteFinal = resultadoTeste?.fonte;
+
+        if (!fonteFinal) {
+          alert('O teste não retornou uma fonte válida para cadastro.');
+          return;
+        }
+
+        await camerasApi.cadastrarRede({
+          nome: nome.trim(),
+          fonte: fonteFinal,
+          onvif: Boolean(candidato.onvif),
+          portas_detectadas: candidato.portas || [],
+        });
+      }
+
+      await pararPreviewTemporario();
+      await onCadastrar();
+      await resetarSelecionada();
+    } catch (error) {
+      alert(mensagemApi(error));
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const handleTestarManual = async () => {
+    if (!manualUrl.trim()) {
+      alert('Informe a URL do stream.');
+      return;
+    }
+
+    setManualTestando(true);
+    limparTesteManual();
+    await pararPreviewTemporario();
+
+    try {
+      const teste = await camerasApi.testarRede({
+        fonte: manualUrl.trim(),
+        usuario: manualUsuario || null,
+        senha: manualSenha || null,
+      });
+
+      const preview = await iniciarPreviewComRetry({
+        fonte: teste?.fonte || manualUrl.trim(),
+        usuario: manualUsuario || null,
+        senha: manualSenha || null,
+        nome: manualNome.trim() || 'Câmera manual',
+        qualidade_jpeg: 82,
+      });
+
+      previewSessionRef.current = preview.session_id;
+      setPreviewSessionId(preview.session_id);
+      setPreviewInfo({ ...teste, ...preview });
+      setManualResultado({ ...teste, ...preview, fonte: teste?.fonte });
+      setManualStatus('sucesso');
+      setPreviewContexto('manual');
+
+      if (teste?.ip && !manualIp.trim()) {
+        setManualIp(teste.ip);
+      }
+    } catch (error) {
+      setManualStatus('erro');
+      setPreviewErro(mensagemApi(error));
+    } finally {
+      setManualTestando(false);
+    }
+  };
+
+  const handleSalvarManual = async () => {
+    if (!manualNome.trim()) {
+      alert('Informe o nome da câmera.');
+      return;
+    }
+
+    if (manualStatus !== 'sucesso') {
+      alert('Teste a conexão com sucesso antes de cadastrar.');
+      return;
+    }
+
+    const fonteFinal = manualResultado?.fonte || manualUrl.trim();
+    if (!fonteFinal) {
+      alert('Informe uma URL de stream válida.');
+      return;
+    }
+
+    setManualSalvando(true);
+
+    try {
+      await camerasApi.cadastrarRede({
+        nome: manualNome.trim(),
+        fonte: fonteFinal,
+        onvif: false,
+        portas_detectadas: [],
+      });
+
+      await pararPreviewTemporario();
+      await onCadastrar();
+
+      setManualNome('');
+      setManualIp('');
+      setManualUrl('');
+      setManualUsuario('');
+      setManualSenha('');
+      setMostrarSenhaManual(false);
+      limparTesteManual();
+    } catch (error) {
+      alert(mensagemApi(error));
+    } finally {
+      setManualSalvando(false);
+    }
+  };
+
+  const invalidarSelecionada = () => {
+    limparTesteSelecionada();
+    if (previewContexto === 'selecionada') {
+      void pararPreviewTemporario();
+    }
+  };
+
+  const invalidarManual = () => {
+    limparTesteManual();
+    if (previewContexto === 'manual') {
+      void pararPreviewTemporario();
+    }
+  };
+
+  const abrirFullscreen = async () => {
+    if (!previewBoxRef.current) return;
+    try {
+      await previewBoxRef.current.requestFullscreen?.();
+    } catch {
+      // Fullscreen é apenas um recurso visual opcional.
+    }
+  };
+
+  const candidato = candidatoSelecionado?.origem === 'rede'
+    ? candidatoSelecionado.candidato || {}
+    : {};
+
+  const previewAtivoSelecionada = previewSessionId && previewContexto === 'selecionada';
+  const previewAtivoManual = previewSessionId && previewContexto === 'manual';
+
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">
-          Cadastro de Câmeras
-        </h2>
-        <p className="text-xs text-slate-500 mt-0.5">
-          Localize dispositivos na rede industrial ou adicione manualmente
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-          <h3 className="text-sm font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100 flex items-center gap-2">
-            <Settings className="w-4 h-4 text-[#FF7412]" />
-            Dados de Comunicação do Dispositivo
-          </h3>
-
-          <form onSubmit={handleSalvar} className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Nome da Câmera *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ex: CAM-01 - Linha de Montagem"
-                  value={nome}
-                  onChange={(e) => setNome(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Endereço IP
-                </label>
-                <input
-                  type="text"
-                  placeholder="192.168.0.100"
-                  value={ip}
-                  onChange={(e) => setIp(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Protocolo
-                </label>
-                <select
-                  value={protocolo}
-                  onChange={(e) => setProtocolo(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                >
-                  <option value="RTSP">RTSP (Real Time Streaming)</option>
-                  <option value="ONVIF">ONVIF Profile S</option>
-                  <option value="HTTP">HTTP Snapshot</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  URL do Stream / Porta
-                </label>
-                <input
-                  type="text"
-                  placeholder="rtsp://192.168.0.4:8554/"
-                  value={urlStream}
-                  onChange={(e) => setUrlStream(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Usuário do Dispositivo
-                </label>
-                <input
-                  type="text"
-                  value={usuario}
-                  onChange={(e) => setUsuario(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Senha de Acesso
-                </label>
-                <input
-                  type="password"
-                  placeholder="••••••••"
-                  value={senha}
-                  onChange={(e) => setSenha(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-                />
-              </div>
-            </div>
-
-            {statusConexao === 'sucesso' && (
-              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>Fluxo de vídeo RTSP validado com sucesso!</span>
-              </div>
-            )}
-
-            <div className="flex items-center gap-3 pt-3">
-              <button
-                type="button"
-                onClick={handleTestar}
-                disabled={testando}
-                className="px-4 py-2 border border-slate-300 hover:bg-slate-100 rounded-lg text-xs font-semibold text-slate-700 flex items-center gap-2"
-              >
-                {testando ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Play className="w-3.5 h-3.5 text-[#FF7412]" />
-                )}
-                Testar Conexão
-              </button>
-
-              <button
-                type="submit"
-                className="px-5 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold shadow-sm transition-colors"
-              >
-                Cadastrar Câmera
-              </button>
-            </div>
-          </form>
+    <div className="max-w-[1500px] mx-auto space-y-4">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium mb-2">
+            <span>Câmeras</span>
+            <ChevronRight className="w-3 h-3" />
+            <span className="text-slate-700 font-semibold">Cadastro de Câmeras</span>
+          </div>
+          <h2 className="text-2xl font-bold text-slate-950">Cadastro de Câmeras</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            Localize, teste e cadastre câmeras disponíveis na rede industrial.
+          </p>
         </div>
 
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-          <div>
-            <h3 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
-              <Cpu className="w-4 h-4 text-[#FF7412]" />
-              Varredura ONVIF na Rede
-            </h3>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              O módulo de descoberta busca câmeras ativas na sub-rede local
-              industrial.
-            </p>
-            <div className="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
-              <div>
-                <strong>Sub-rede:</strong> 192.168.0.0/24
-              </div>
-              <div>
-                <strong>Portas escaneadas:</strong> 554, 80, 8000
-              </div>
+        <div className="flex flex-wrap items-stretch gap-3">
+          <div className="min-w-[175px] px-4 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center">
+              <Video className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] font-bold text-emerald-700 block">Rede detectada</span>
+              <span className="text-[10px] text-emerald-700/80 block mt-0.5">
+                {redeDetectada || 'Aguardando busca'}
+              </span>
             </div>
           </div>
 
           <button
-            onClick={() => alert('Buscando dispositivos na rede local...')}
-            className="w-full mt-6 py-2.5 border border-[#FF7412] text-[#FF7412] hover:bg-orange-50 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+            type="button"
+            onClick={() => void handleBuscar()}
+            disabled={buscando}
+            className="px-5 py-2.5 rounded-xl bg-[#FF7412] hover:bg-[#e0620a] text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-sm disabled:opacity-60"
           >
-            <Search className="w-4 h-4" />
-            Buscar Câmeras Conectadas
+            {buscando ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Search className="w-4 h-4" />
+            )}
+            {buscando ? 'Buscando...' : 'Buscar Câmeras'}
           </button>
         </div>
       </div>
+
+      {previewErro && (
+        <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{previewErro}</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.35fr_1fr] gap-4 items-stretch">
+        <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#FF7412] flex items-center justify-center">
+                <Video className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Câmeras Encontradas</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Dispositivos localizados na rede e fontes USB disponíveis.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleBuscar()}
+              disabled={buscando}
+              className="w-9 h-9 rounded-lg border border-slate-200 hover:bg-slate-50 text-[#FF7412] flex items-center justify-center disabled:opacity-50"
+              title="Atualizar busca"
+            >
+              <RefreshCw className={`w-4 h-4 ${buscando ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-700 border-b border-slate-200">
+                  <tr>
+                    <th className="px-3 py-3 font-bold">Status</th>
+                    <th className="px-3 py-3 font-bold">Dispositivo</th>
+                    <th className="px-3 py-3 font-bold">IP / Fonte</th>
+                    <th className="px-3 py-3 font-bold">Protocolo</th>
+                    <th className="px-3 py-3 font-bold">Portas</th>
+                    <th className="px-3 py-3 font-bold">ONVIF</th>
+                    <th className="px-3 py-3 font-bold text-right">Ação</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {candidatos.map((item, index) => {
+                    const rede = item.origem === 'rede' ? item.candidato || {} : {};
+                    const selecionado = candidatoSelecionado === item;
+
+                    return (
+                      <tr
+                        key={`${item.origem}-${item.indice ?? rede.ip ?? index}`}
+                        className={selecionado ? 'bg-orange-50/60' : 'hover:bg-slate-50/70'}
+                      >
+                        <td className="px-3 py-3">
+                          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-700">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                            Encontrada
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 font-semibold text-slate-800 whitespace-nowrap">
+                          {nomeCandidato(item, index)}
+                        </td>
+                        <td className="px-3 py-3 text-slate-600 whitespace-nowrap">
+                          {item.origem === 'usb' ? `USB ${item.indice ?? '-'}` : rede.ip || '-'}
+                        </td>
+                        <td className="px-3 py-3 text-slate-600 whitespace-nowrap uppercase">
+                          {protocoloCandidato(item)}
+                        </td>
+                        <td className="px-3 py-3 text-slate-600 whitespace-nowrap">
+                          {portasCandidato(item)}
+                        </td>
+                        <td className="px-3 py-3">
+                          {item.origem === 'usb' ? (
+                            <span className="text-slate-400">-</span>
+                          ) : (
+                            <span className={rede.onvif ? 'text-emerald-600 font-semibold' : 'text-slate-500'}>
+                              {rede.onvif ? 'Sim' : 'Não'}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => void selecionarCandidato(item)}
+                            className={`px-3 py-1.5 rounded-lg border text-[10px] font-semibold transition-colors ${
+                              selecionado
+                                ? 'border-[#FF7412] bg-[#FF7412] text-white'
+                                : 'border-orange-200 text-[#FF7412] hover:bg-orange-50'
+                            }`}
+                          >
+                            {selecionado ? 'Selecionada' : 'Selecionar'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {!buscando && candidatos.length === 0 && (
+                    <tr>
+                      <td colSpan="7" className="px-4 py-12 text-center">
+                        <Camera className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <p className="text-xs font-semibold text-slate-600">Nenhuma busca realizada.</p>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Clique em “Buscar Câmeras” para localizar dispositivos disponíveis.
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 flex items-center gap-3">
+            <div className="w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center text-xs font-bold shrink-0">i</div>
+            <div>
+              <span className="text-[11px] font-semibold text-blue-800">
+                {candidatos.length} dispositivo(s) encontrado(s)
+              </span>
+              <p className="text-[10px] text-blue-700 mt-0.5">
+                Selecione uma câmera, informe as credenciais quando necessário e teste a conexão.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#FF7412] flex items-center justify-center">
+              <Settings className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-900">Configurar Câmera</h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Teste a conexão e confira o vídeo antes de cadastrar.
+              </p>
+            </div>
+          </div>
+
+          {candidatoSelecionado ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] gap-3">
+                <div className="rounded-xl border border-orange-100 bg-orange-50/60 p-3.5">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-white border border-orange-100 text-[#FF7412] flex items-center justify-center shrink-0">
+                      <Video className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[10px] font-bold text-[#FF7412] block">Câmera Selecionada</span>
+                      <strong className="text-xs text-slate-900 block truncate mt-0.5">
+                        {nomeCandidato(candidatoSelecionado)}
+                      </strong>
+                      <div className="mt-2 space-y-1 text-[10px] text-slate-600">
+                        <p>
+                          Fonte: <strong>{candidatoSelecionado.origem === 'usb' ? `USB ${candidatoSelecionado.indice}` : candidato.ip || '-'}</strong>
+                        </p>
+                        <p>
+                          Protocolo: <strong className="uppercase">{protocoloCandidato(candidatoSelecionado)}</strong>
+                        </p>
+                        <p className="flex items-center gap-1.5">
+                          Status:
+                          <span className={`w-2 h-2 rounded-full ${statusConexao === 'sucesso' ? 'bg-emerald-500' : statusConexao === 'erro' ? 'bg-red-500' : 'bg-slate-400'}`} />
+                          <strong>
+                            {statusConexao === 'sucesso'
+                              ? 'Conexão validada'
+                              : statusConexao === 'erro'
+                                ? 'Falha no teste'
+                                : 'Ainda não testada'}
+                          </strong>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[11px] font-bold text-slate-800 block mb-2">Preview da Câmera</span>
+                  <div
+                    ref={previewBoxRef}
+                    className="relative aspect-video rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center"
+                  >
+                    {previewAtivoSelecionada && frameSrc ? (
+                      <img
+                        src={frameSrc}
+                        alt="Preview da câmera selecionada"
+                        className="absolute inset-0 w-full h-full object-contain bg-black"
+                      />
+                    ) : (
+                      <div className="text-center px-4">
+                        {testando ? (
+                          <RefreshCw className="w-8 h-8 text-[#FF7412] animate-spin mx-auto mb-2" />
+                        ) : (
+                          <Camera className="w-9 h-9 text-slate-600 mx-auto mb-2" />
+                        )}
+                        <p className="text-[10px] text-slate-400">
+                          {testando ? 'Abrindo transmissão...' : 'Clique em Testar Conexão para abrir a câmera.'}
+                        </p>
+                      </div>
+                    )}
+
+                    {previewAtivoSelecionada && (
+                      <div className="absolute top-2 left-2 rounded bg-black/65 border border-white/10 px-2 py-1 text-[9px] text-white flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        AO VIVO
+                      </div>
+                    )}
+
+                    {previewAtivoSelecionada && frameSrc && (
+                      <button
+                        type="button"
+                        onClick={() => void abrirFullscreen()}
+                        className="absolute right-2 bottom-2 w-8 h-8 rounded-lg bg-black/60 hover:bg-black/80 border border-white/10 text-white flex items-center justify-center"
+                        title="Tela cheia"
+                      >
+                        <Maximize2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1.5">
+                    Nome da câmera <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={nome}
+                    onChange={(e) => setNome(e.target.value)}
+                    placeholder="Ex: CAM-02 - Produção"
+                    className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1.5">Usuário</label>
+                  <input
+                    type="text"
+                    value={usuario}
+                    onChange={(e) => {
+                      setUsuario(e.target.value);
+                      invalidarSelecionada();
+                    }}
+                    disabled={candidatoSelecionado.origem === 'usb'}
+                    placeholder="Ex: admin"
+                    className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none disabled:bg-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1.5">Senha</label>
+                  <div className="relative">
+                    <input
+                      type={mostrarSenha ? 'text' : 'password'}
+                      value={senha}
+                      onChange={(e) => {
+                        setSenha(e.target.value);
+                        invalidarSelecionada();
+                      }}
+                      disabled={candidatoSelecionado.origem === 'usb'}
+                      placeholder="••••••••"
+                      className="w-full text-xs bg-white border border-slate-300 rounded-lg pl-3 pr-10 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none disabled:bg-slate-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setMostrarSenha((valor) => !valor)}
+                      disabled={candidatoSelecionado.origem === 'usb'}
+                      className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 disabled:opacity-40"
+                      title="Mostrar ou ocultar senha"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 rounded-xl bg-slate-50 border border-slate-200 p-3 text-[10px]">
+                <div>
+                  <span className="text-slate-400 block">Status</span>
+                  <strong className={statusConexao === 'sucesso' ? 'text-emerald-600' : 'text-slate-600'}>
+                    {statusConexao === 'sucesso' ? 'ONLINE' : '-'}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">Resolução</span>
+                  <strong className="text-slate-700">
+                    {previewInfo?.largura && previewInfo?.altura
+                      ? `${previewInfo.largura} × ${previewInfo.altura}`
+                      : '-'}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">FPS</span>
+                  <strong className="text-slate-700">{previewInfo?.fps ?? '-'}</strong>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => void handleTestarSelecionada()}
+                  disabled={testando || salvando}
+                  className="px-4 py-2.5 border border-orange-200 hover:bg-orange-50 rounded-lg text-[11px] font-semibold text-[#FF7412] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {testando ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  {previewAtivoSelecionada ? 'Testar Novamente' : 'Testar Conexão'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleSalvarSelecionada()}
+                  disabled={salvando || statusConexao !== 'sucesso'}
+                  className="px-4 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-[11px] font-semibold flex items-center gap-2 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {salvando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  {salvando ? 'Cadastrando...' : 'Cadastrar Câmera'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="min-h-[430px] rounded-xl border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center p-8 text-center">
+              <div>
+                <Camera className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                <h4 className="text-sm font-bold text-slate-700">Nenhuma câmera selecionada</h4>
+                <p className="text-[11px] text-slate-500 mt-1 max-w-sm">
+                  Faça uma busca e selecione uma câmera na lista ao lado para configurar e visualizar o preview.
+                </p>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#FF7412] flex items-center justify-center shrink-0">
+            <PlusCircle className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-bold text-slate-900">Adicionar Câmera Manualmente</h3>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Use esta opção quando a câmera não for encontrada automaticamente.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_1fr_1.25fr_0.8fr_0.8fr] gap-3">
+          <div>
+            <label className="block text-[10px] font-bold text-slate-700 mb-1.5">
+              Nome da câmera <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={manualNome}
+              onChange={(e) => setManualNome(e.target.value)}
+              placeholder="Ex: CAM-03 - Entrada"
+              className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-slate-700 mb-1.5">IP ou endereço</label>
+            <input
+              type="text"
+              value={manualIp}
+              onChange={(e) => setManualIp(e.target.value)}
+              placeholder="Ex: 192.168.0.100"
+              className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-slate-700 mb-1.5">
+              URL do Stream <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={manualUrl}
+              onChange={(e) => {
+                setManualUrl(e.target.value);
+                invalidarManual();
+              }}
+              placeholder="Ex: rtsp://192.168.0.100:554/stream"
+              className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Usuário</label>
+            <input
+              type="text"
+              value={manualUsuario}
+              onChange={(e) => {
+                setManualUsuario(e.target.value);
+                invalidarManual();
+              }}
+              placeholder="Ex: admin"
+              className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Senha</label>
+            <div className="relative">
+              <input
+                type={mostrarSenhaManual ? 'text' : 'password'}
+                value={manualSenha}
+                onChange={(e) => {
+                  setManualSenha(e.target.value);
+                  invalidarManual();
+                }}
+                placeholder="••••••••"
+                className="w-full text-xs bg-white border border-slate-300 rounded-lg pl-3 pr-10 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setMostrarSenhaManual((valor) => !valor)}
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
+                title="Mostrar ou ocultar senha"
+              >
+                <Eye className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[auto_auto_1fr] gap-3 items-center mt-4">
+          <button
+            type="button"
+            onClick={() => void handleTestarManual()}
+            disabled={manualTestando || manualSalvando}
+            className="px-4 py-2.5 border border-orange-200 hover:bg-orange-50 rounded-lg text-[11px] font-semibold text-[#FF7412] flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {manualTestando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            {previewAtivoManual ? 'Testar Novamente' : 'Testar Conexão'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleSalvarManual()}
+            disabled={manualSalvando || manualStatus !== 'sucesso'}
+            className="px-4 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-[11px] font-semibold flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {manualSalvando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            {manualSalvando ? 'Cadastrando...' : 'Cadastrar Câmera'}
+          </button>
+
+          <div className={`min-h-[42px] rounded-lg border px-3 py-2 flex items-center gap-3 ${
+            manualStatus === 'sucesso'
+              ? 'border-emerald-200 bg-emerald-50'
+              : manualStatus === 'erro'
+                ? 'border-red-200 bg-red-50'
+                : 'border-slate-200 bg-slate-50'
+          }`}>
+            {previewAtivoManual && frameSrc ? (
+              <img
+                src={frameSrc}
+                alt="Preview da câmera manual"
+                className="w-14 h-9 rounded object-cover bg-black shrink-0"
+              />
+            ) : (
+              <div className="w-14 h-9 rounded bg-slate-200 flex items-center justify-center shrink-0">
+                <Camera className="w-4 h-4 text-slate-400" />
+              </div>
+            )}
+            <div className="min-w-0">
+              <span className={`text-[10px] font-bold block ${
+                manualStatus === 'sucesso'
+                  ? 'text-emerald-700'
+                  : manualStatus === 'erro'
+                    ? 'text-red-700'
+                    : 'text-slate-500'
+              }`}>
+                {manualStatus === 'sucesso'
+                  ? 'Conexão validada — preview ativo'
+                  : manualStatus === 'erro'
+                    ? 'Falha ao abrir a câmera'
+                    : 'Aguardando teste da câmera manual'}
+              </span>
+              {manualStatus === 'sucesso' && (
+                <span className="text-[9px] text-emerald-700/80 block truncate">
+                  {previewInfo?.largura && previewInfo?.altura
+                    ? `${previewInfo.largura} × ${previewInfo.altura}`
+                    : 'Resolução não informada'}
+                  {previewInfo?.fps ? ` • ${previewInfo.fps} FPS` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
 
+
 // 3. CONSULTA DE CÂMERAS
-function ConsultaCamerasView({ cameras, onNavigate }) {
+function ConsultaCamerasView({ cameras, loading, erro, onRefresh, onNavigate }) {
+  const [processandoUid, setProcessandoUid] = useState(null);
+
+  const handleRemover = async (camera) => {
+    const uid = camera.camera_uid;
+    if (!uid) return;
+
+    if (!window.confirm(`Remover a câmera "${camera.nome}"?`)) {
+      return;
+    }
+
+    setProcessandoUid(uid);
+
+    try {
+      const vinculos = await camerasApi.obterVinculos(uid);
+      const possui = Boolean(vinculos.possui_vinculos || vinculos.vinculada);
+      const itens = vinculos.vinculos || vinculos.ambientes || [];
+
+      if (possui) {
+        const nomes = itens
+          .map((item) => item.nome || item.ambiente_nome || item.ambiente_id)
+          .filter(Boolean)
+          .join(', ');
+
+        alert(`A câmera possui vínculo com ambiente${itens.length === 1 ? '' : 's'}${nomes ? `: ${nomes}` : '.'}`);
+        return;
+      }
+
+      await camerasApi.remover(uid);
+      await onRefresh();
+    } catch (error) {
+      alert(mensagemApi(error));
+    } finally {
+      setProcessandoUid(null);
+    }
+  };
+
+  const handleEditar = async (cameraResumo) => {
+    const uid = cameraResumo.camera_uid;
+    if (!uid) return;
+
+    setProcessandoUid(uid);
+
+    try {
+      const detalhe = await camerasApi.obter(uid);
+      const camera = detalhe.camera || {};
+      const novoNome = window.prompt('Nome da câmera:', camera.nome || cameraResumo.nome || '');
+
+      if (novoNome === null) return;
+
+      const payload = { nome: novoNome.trim() };
+
+      if (String(camera.tipo || '').toLowerCase() !== 'usb') {
+        const fonteAtual = camera.conexao?.fonte || '';
+        const novaFonte = window.prompt('URL do stream:', fonteAtual);
+        if (novaFonte === null) return;
+        payload.fonte = novaFonte.trim();
+        payload.onvif = camera.conexao?.onvif;
+      }
+
+      await camerasApi.editar(uid, payload);
+      await onRefresh();
+    } catch (error) {
+      alert(mensagemApi(error));
+    } finally {
+      setProcessandoUid(null);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900">
-            Consulta de Câmeras
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Gerencie os fluxos de vídeo configurados no sistema
-          </p>
+          <h2 className="text-xl font-bold text-slate-900">Consulta de Câmeras</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Gerencie os fluxos de vídeo configurados no sistema</p>
         </div>
-        <button
-          onClick={() => onNavigate('cadastro-cameras')}
-          className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 self-start"
-        >
-          <PlusCircle className="w-4 h-4" />
-          Nova Câmera
-        </button>
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => void onRefresh()}
+            disabled={loading}
+            className="px-4 py-2 border border-slate-300 hover:bg-slate-100 rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Atualizar Status
+          </button>
+          <button
+            onClick={() => onNavigate('cadastro-cameras')}
+            className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 self-start"
+          >
+            <PlusCircle className="w-4 h-4" />
+            Nova Câmera
+          </button>
+        </div>
       </div>
 
-      {cameras.length === 0 ? (
+      {erro && (
+        <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          {erro}
+        </div>
+      )}
+
+      {loading && cameras.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-sm text-slate-500">
+          <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-3 text-[#FF7412]" />
+          Consultando câmeras no backend...
+        </div>
+      ) : cameras.length === 0 ? (
         <EmptyState
           icon={Video}
           title="Nenhuma câmera registrada no banco"
-          description="Você ainda não possui câmeras salvas. Quando o backend retornar os dados ou você cadastrar uma nova, ela será listada nesta tabela."
+          description="O backend não retornou câmeras cadastradas. Cadastre uma câmera para começar."
           actionText="Adicionar Primeira Câmera"
           onAction={() => onNavigate('cadastro-cameras')}
         />
@@ -1132,35 +2161,52 @@ function ConsultaCamerasView({ cameras, onNavigate }) {
               <tr>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4">Nome</th>
-                <th className="py-3 px-4">IP</th>
-                <th className="py-3 px-4">Protocolo</th>
+                <th className="py-3 px-4">Tipo</th>
+                <th className="py-3 px-4">Resolução</th>
+                <th className="py-3 px-4">FPS</th>
                 <th className="py-3 px-4 text-right">Ações</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {cameras.map((c) => (
-                <tr key={c.id} className="hover:bg-slate-50/80">
-                  <td className="py-3 px-4">
-                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
-                      {c.status}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 font-semibold text-slate-800">
-                    {c.nome}
-                  </td>
-                  <td className="py-3 px-4">{c.ip}</td>
-                  <td className="py-3 px-4">{c.protocolo}</td>
-                  <td className="py-3 px-4 text-right space-x-2">
-                    <button className="text-slate-500 hover:text-slate-800 p-1">
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
-                    <button className="text-red-500 hover:text-red-700 p-1">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {cameras.map((camera) => {
+                const online = Boolean(camera.online) || String(camera.status).toUpperCase() === 'ONLINE';
+                const processando = processandoUid === camera.camera_uid;
+
+                return (
+                  <tr key={camera.camera_uid} className="hover:bg-slate-50/80">
+                    <td className="py-3 px-4">
+                      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                        online ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-600' : 'bg-red-600'}`} />
+                        {camera.status || (online ? 'ONLINE' : 'OFFLINE')}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 font-semibold text-slate-800">{camera.nome}</td>
+                    <td className="py-3 px-4 uppercase">{camera.tipo || '-'}</td>
+                    <td className="py-3 px-4">{camera.largura && camera.altura ? `${camera.largura} × ${camera.altura}` : '-'}</td>
+                    <td className="py-3 px-4">{camera.fps ?? '-'}</td>
+                    <td className="py-3 px-4 text-right space-x-2">
+                      <button
+                        onClick={() => void handleEditar(camera)}
+                        disabled={processando}
+                        className="text-slate-500 hover:text-slate-800 p-1 disabled:opacity-40"
+                        title="Editar câmera"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => void handleRemover(camera)}
+                        disabled={processando}
+                        className="text-red-500 hover:text-red-700 p-1 disabled:opacity-40"
+                        title="Remover câmera"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1170,60 +2216,249 @@ function ConsultaCamerasView({ cameras, onNavigate }) {
 }
 
 // 4. TESTE DE CÂMERAS
-function TesteCamerasView({ cameras, onNavigate }) {
-  const [selectedCam, setSelectedCam] = useState(cameras[0]?.id || '');
+function TesteCamerasView({ cameras, loading, erro, onRefresh, onNavigate }) {
+  const [selectedCam, setSelectedCam] = useState(cameras[0]?.camera_uid || '');
+  const [sessionId, setSessionId] = useState(null);
+  const [frameSrc, setFrameSrc] = useState(null);
+  const [previewInfo, setPreviewInfo] = useState(null);
+  const [previewErro, setPreviewErro] = useState(null);
+  const [iniciando, setIniciando] = useState(false);
+  const [reconectando, setReconectando] = useState(false);
+  const previewRef = React.useRef(null);
+
+  const cameraSelecionada = cameras.find((camera) => camera.camera_uid === selectedCam) || null;
+
+  useEffect(() => {
+    if (!selectedCam && cameras[0]?.camera_uid) {
+      setSelectedCam(cameras[0].camera_uid);
+    }
+  }, [cameras, selectedCam]);
+
+  const pararPreview = async (session = sessionId) => {
+    if (!session) return;
+
+    try {
+      await camerasApi.pararPreview(session);
+    } catch (error) {
+      if (error?.payload?.erro !== 'PREVIEW_NAO_ENCONTRADO') {
+        setPreviewErro(mensagemApi(error));
+      }
+    } finally {
+      setSessionId(null);
+      setFrameSrc(null);
+      setPreviewInfo(null);
+    }
+  };
+
+  const iniciarPreview = async () => {
+    if (!selectedCam) return;
+
+    if (sessionId) {
+      await pararPreview(sessionId);
+    }
+
+    setIniciando(true);
+    setPreviewErro(null);
+
+    try {
+      const dados = await camerasApi.iniciarPreview(selectedCam);
+      setSessionId(dados.session_id);
+      setPreviewInfo(dados);
+    } catch (error) {
+      setPreviewErro(mensagemApi(error));
+    } finally {
+      setIniciando(false);
+    }
+  };
+
+  const reconectar = async () => {
+    if (!sessionId) return;
+
+    setReconectando(true);
+    setPreviewErro(null);
+
+    try {
+      const dados = await camerasApi.reconectarPreview(sessionId);
+      setPreviewInfo((prev) => ({ ...prev, ...dados }));
+    } catch (error) {
+      setPreviewErro(mensagemApi(error));
+    } finally {
+      setReconectando(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!sessionId) return undefined;
+
+    let cancelado = false;
+    let executando = false;
+
+    const atualizarFrame = async () => {
+      if (cancelado || executando) return;
+      executando = true;
+
+      try {
+        const dados = await camerasApi.obterFramePreview(sessionId);
+        if (!cancelado && dados.frame_base64) {
+          setFrameSrc(`data:${dados.mime_type || 'image/jpeg'};base64,${dados.frame_base64}`);
+          setPreviewInfo((prev) => ({ ...prev, ...dados }));
+          setPreviewErro(null);
+        }
+      } catch (error) {
+        if (!cancelado) {
+          setPreviewErro(mensagemApi(error));
+        }
+      } finally {
+        executando = false;
+      }
+    };
+
+    void atualizarFrame();
+    const timer = window.setInterval(atualizarFrame, 300);
+
+    return () => {
+      cancelado = true;
+      window.clearInterval(timer);
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (sessionId) {
+        void camerasApi.pararPreview(sessionId).catch(() => {});
+      }
+    };
+  }, [sessionId]);
+
+  const trocarCamera = async (novoUid) => {
+    if (sessionId) {
+      await pararPreview(sessionId);
+    }
+    setSelectedCam(novoUid);
+    setPreviewErro(null);
+  };
+
+  const abrirFullscreen = async () => {
+    if (!previewRef.current) return;
+    try {
+      await previewRef.current.requestFullscreen?.();
+    } catch {
+      // Fullscreen é opcional e visual.
+    }
+  };
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">
-          Teste de Câmeras em Tempo Real
-        </h2>
-        <p className="text-xs text-slate-500 mt-0.5">
-          Valide latência e estabilidade do stream de vídeo
-        </p>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Teste de Câmeras em Tempo Real</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Visualize e valide a transmissão das câmeras cadastradas no backend</p>
+        </div>
+        <button
+          onClick={() => void onRefresh()}
+          disabled={loading}
+          className="px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Atualizar
+        </button>
       </div>
+
+      {(erro || previewErro) && (
+        <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          {previewErro || erro}
+        </div>
+      )}
 
       {cameras.length === 0 ? (
         <EmptyState
           icon={Camera}
           title="Sem câmeras para testar"
-          description="Para rodar testes de streaming e validar FPS/latência, cadastre ao menos um dispositivo."
+          description="Cadastre ao menos uma câmera no backend para iniciar o preview."
           actionText="Ir para Cadastro"
           onAction={() => onNavigate('cadastro-cameras')}
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 bg-black rounded-xl overflow-hidden aspect-video flex flex-col items-center justify-center text-white relative shadow-lg">
-            <div className="text-center p-4">
-              <Camera className="w-12 h-12 text-[#FF7412] mx-auto mb-2 opacity-80" />
-              <p className="text-xs text-slate-400">Canal de Stream Pronto</p>
-              <span className="text-[11px] text-slate-500 mt-1 block">
-                Aguardando feed de vídeo do backend
-              </span>
+          <div className="lg:col-span-2 space-y-3">
+            <div
+              ref={previewRef}
+              className="bg-black rounded-xl overflow-hidden aspect-video flex flex-col items-center justify-center text-white relative shadow-lg"
+            >
+              {frameSrc ? (
+                <img src={frameSrc} alt="Preview da câmera" className="w-full h-full object-contain bg-black" />
+              ) : (
+                <div className="text-center p-4">
+                  <Camera className="w-12 h-12 text-[#FF7412] mx-auto mb-2 opacity-80" />
+                  <p className="text-xs text-slate-300">
+                    {sessionId ? 'Aguardando frame da câmera...' : 'Transmissão parada'}
+                  </p>
+                </div>
+              )}
+
+              <div className="absolute top-3 left-3 bg-black/60 backdrop-blur px-2.5 py-1 rounded text-[10px] font-mono text-white flex items-center gap-1.5 border border-white/10">
+                <span className={`w-2 h-2 rounded-full ${sessionId ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+                {cameraSelecionada?.nome || 'Câmera'}
+              </div>
+
+              <button
+                type="button"
+                onClick={abrirFullscreen}
+                className="absolute right-3 bottom-3 p-2 rounded bg-black/60 border border-white/10 hover:bg-black/80"
+                title="Tela cheia"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
             </div>
-            <div className="absolute top-3 left-3 bg-black/60 backdrop-blur px-2.5 py-1 rounded text-[10px] font-mono text-emerald-400 flex items-center gap-1.5 border border-white/10">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" /> RTSP
-              READY
+
+            <div className="flex flex-wrap gap-2">
+              {!sessionId ? (
+                <button
+                  type="button"
+                  onClick={() => void iniciarPreview()}
+                  disabled={iniciando || !selectedCam}
+                  className="px-4 py-2 bg-[#FF7412] text-white rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-50"
+                >
+                  {iniciando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  Iniciar Transmissão
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void pararPreview()}
+                  className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-xs font-semibold flex items-center gap-2"
+                >
+                  <Square className="w-4 h-4" />
+                  Parar Transmissão
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void reconectar()}
+                disabled={!sessionId || reconectando}
+                className="px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-40"
+              >
+                <RefreshCw className={`w-4 h-4 ${reconectando ? 'animate-spin' : ''}`} />
+                Reconectar
+              </button>
             </div>
           </div>
 
           <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-              Controle do Feed
-            </h3>
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Controle do Feed</h3>
+
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Selecionar Câmera
-              </label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Selecionar Câmera</label>
               <select
                 value={selectedCam}
-                onChange={(e) => setSelectedCam(e.target.value)}
+                onChange={(e) => void trocarCamera(e.target.value)}
                 className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
               >
-                {cameras.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.nome}
+                {cameras.map((camera) => (
+                  <option key={camera.camera_uid} value={camera.camera_uid}>
+                    {camera.nome}
                   </option>
                 ))}
               </select>
@@ -1231,20 +2466,34 @@ function TesteCamerasView({ cameras, onNavigate }) {
 
             <div className="p-3 bg-slate-50 rounded-lg text-xs space-y-1.5 text-slate-600">
               <div className="flex justify-between">
-                <span>Status:</span>{' '}
-                <strong className="text-emerald-600">Conectado</strong>
+                <span>Status:</span>
+                <strong className={String(cameraSelecionada?.status).toUpperCase() === 'ONLINE' ? 'text-emerald-600' : 'text-red-600'}>
+                  {cameraSelecionada?.status || '-'}
+                </strong>
               </div>
               <div className="flex justify-between">
-                <span>Latência Média:</span> <strong>~45ms</strong>
+                <span>Tipo:</span>
+                <strong className="uppercase">{cameraSelecionada?.tipo || '-'}</strong>
               </div>
               <div className="flex justify-between">
-                <span>Taxa de Quadros:</span> <strong>30 FPS</strong>
+                <span>Resolução:</span>
+                <strong>
+                  {previewInfo?.largura && previewInfo?.altura
+                    ? `${previewInfo.largura} × ${previewInfo.altura}`
+                    : cameraSelecionada?.largura && cameraSelecionada?.altura
+                      ? `${cameraSelecionada.largura} × ${cameraSelecionada.altura}`
+                      : '-'}
+                </strong>
+              </div>
+              <div className="flex justify-between">
+                <span>FPS:</span>
+                <strong>{previewInfo?.fps ?? cameraSelecionada?.fps ?? '-'}</strong>
               </div>
             </div>
 
-            <button className="w-full py-2 bg-[#FF7412] text-white rounded-lg text-xs font-semibold hover:bg-[#e0620a] transition-colors">
-              Iniciar Captura de Teste
-            </button>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+              Codec e latência não são exibidos porque o backend atual não fornece esses dados.
+            </p>
           </div>
         </div>
       )}
@@ -1252,76 +2501,942 @@ function TesteCamerasView({ cameras, onNavigate }) {
   );
 }
 
-// 5. CADASTRO / EDIÇÃO DE AMBIENTE (COM SUPORTE A EDIÇÃO COMPLETA)
+// 5. CADASTRO / EDIÇÃO DE AMBIENTE — ETAPA 1 VISUAL
 function CadastroAmbienteView({
   ambienteEmEdicao,
   camerasDisponiveis,
   onSalvarAmbiente,
+  onConcluirAmbiente,
   onCancelarEdicao,
 }) {
   const [nomeAmbiente, setNomeAmbiente] = useState('');
-  const [cameraVinculada, setCameraVinculada] = useState('');
   const [descricao, setDescricao] = useState('');
-  const [episObrigatorios, setEpisObrigatorios] = useState([
-    'Capacete',
-    'Óculos de proteção',
-  ]);
+  const [cameraSelecionadaUid, setCameraSelecionadaUid] = useState('');
+  const [erro, setErro] = useState(null);
+  const [etapaAtual, setEtapaAtual] = useState(1);
 
-  // Carrega os dados se estiver em modo de edição
+  // Etapa 2 — preview e ROI.
+  const [previewSessionId, setPreviewSessionId] = useState(null);
+  const [frameSrc, setFrameSrc] = useState(null);
+  const [previewInfo, setPreviewInfo] = useState(null);
+  const [previewErro, setPreviewErro] = useState(null);
+  const [iniciandoPreview, setIniciandoPreview] = useState(false);
+  const [modoSelecao, setModoSelecao] = useState(false);
+  const [arrastandoRoi, setArrastandoRoi] = useState(false);
+  const [inicioRoi, setInicioRoi] = useState(null);
+  const [roi, setRoi] = useState(null);
+  const [roiConfirmada, setRoiConfirmada] = useState(false);
+  const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
+  const [previewBox, setPreviewBox] = useState({ width: 0, height: 0 });
+
+  // Etapa 3 — persistência mínima do ambiente + seleção manual de maquinário.
+  const [ambienteIdFluxo, setAmbienteIdFluxo] = useState(null);
+  const [preparandoMaquinario, setPreparandoMaquinario] = useState(false);
+  const [analiseMaquinarioId, setAnaliseMaquinarioId] = useState(null);
+  const [objetosDetectados, setObjetosDetectados] = useState([]);
+  const [idsMaquinario, setIdsMaquinario] = useState([]);
+  const [imagemMaquinarioSrc, setImagemMaquinarioSrc] = useState(null);
+  const [salvandoMaquinario, setSalvandoMaquinario] = useState(false);
+  const [maquinarioConfirmado, setMaquinarioConfirmado] = useState(false);
+
+  // Etapa 4 — EPIs obrigatórios.
+  const [episDisponiveis, setEpisDisponiveis] = useState([]);
+  const [episObrigatorios, setEpisObrigatorios] = useState([]);
+  const [episLoading, setEpisLoading] = useState(false);
+  const [salvandoEpis, setSalvandoEpis] = useState(false);
+  const [episConfirmados, setEpisConfirmados] = useState(false);
+
+  // Etapa 5 — colaboradores vinculados.
+  const [colaboradoresDisponiveis, setColaboradoresDisponiveis] = useState([]);
+  const [matriculasSelecionadas, setMatriculasSelecionadas] = useState([]);
+  const [colaboradoresLoading, setColaboradoresLoading] = useState(false);
+  const [salvandoColaboradores, setSalvandoColaboradores] = useState(false);
+  const [colaboradoresConfirmados, setColaboradoresConfirmados] = useState(false);
+  const [buscaColaboradorAmbiente, setBuscaColaboradorAmbiente] = useState('');
+
+  // Etapa 6 — revisão e finalização.
+  const [revisaoDados, setRevisaoDados] = useState(null);
+  const [revisaoLoading, setRevisaoLoading] = useState(false);
+  const [finalizandoAmbiente, setFinalizandoAmbiente] = useState(false);
+
+  const previewStageRef = React.useRef(null);
+  const previewSessionRef = React.useRef(null);
+  const zoomCanvasRef = React.useRef(null);
+
+  const etapas = [
+    { numero: 1, titulo: 'Dados do Ambiente', resumo: 'Nome, descrição e câmera' },
+    { numero: 2, titulo: 'Área de Monitoramento', resumo: 'Defina a região na imagem' },
+    { numero: 3, titulo: 'Maquinário', resumo: 'Detecte e confirme os equipamentos' },
+    { numero: 4, titulo: 'EPIs', resumo: 'Selecione os EPIs obrigatórios' },
+    { numero: 5, titulo: 'Colaboradores', resumo: 'Vincule os colaboradores' },
+    { numero: 6, titulo: 'Revisão', resumo: 'Confira e salve o ambiente' },
+  ];
+
   useEffect(() => {
     if (ambienteEmEdicao) {
       setNomeAmbiente(ambienteEmEdicao.nome || '');
-      setCameraVinculada(ambienteEmEdicao.camera || '');
       setDescricao(ambienteEmEdicao.descricao || '');
-      setEpisObrigatorios(ambienteEmEdicao.epis || []);
+      setCameraSelecionadaUid(
+        Array.isArray(ambienteEmEdicao.cameras)
+          ? ambienteEmEdicao.cameras[0]?.camera_uid || ''
+          : ''
+      );
     } else {
       setNomeAmbiente('');
-      setCameraVinculada('');
       setDescricao('');
-      setEpisObrigatorios(['Capacete', 'Óculos de proteção']);
+      setCameraSelecionadaUid('');
     }
+
+    setEtapaAtual(1);
+    setErro(null);
+    setPreviewErro(null);
+    setFrameSrc(null);
+    setPreviewInfo(null);
+    setRoi(null);
+    setRoiConfirmada(false);
+    setModoSelecao(false);
+    setAmbienteIdFluxo(ambienteEmEdicao?.ambiente_id || null);
+    setPreparandoMaquinario(false);
+    setAnaliseMaquinarioId(null);
+    setObjetosDetectados([]);
+    setIdsMaquinario([]);
+    setImagemMaquinarioSrc(null);
+    setSalvandoMaquinario(false);
+    setMaquinarioConfirmado(false);
+    setEpisDisponiveis([]);
+    setEpisObrigatorios([]);
+    setEpisLoading(false);
+    setSalvandoEpis(false);
+    setEpisConfirmados(false);
+    setColaboradoresDisponiveis([]);
+    setMatriculasSelecionadas([]);
+    setColaboradoresLoading(false);
+    setSalvandoColaboradores(false);
+    setColaboradoresConfirmados(false);
+    setBuscaColaboradorAmbiente('');
+    setRevisaoDados(null);
+    setRevisaoLoading(false);
+    setFinalizandoAmbiente(false);
   }, [ambienteEmEdicao]);
 
-  const listaEpisDisponiveis = [
-    'Capacete',
-    'Óculos de proteção',
-    'Protetor auricular',
-    'Luvas térmicas / corte',
-    'Colete reflexivo',
-    'Máscara respiratória',
-    'Botina com bico de aço',
-  ];
+  useEffect(() => {
+    if (!cameraSelecionadaUid && camerasDisponiveis.length === 1) {
+      setCameraSelecionadaUid(camerasDisponiveis[0].camera_uid || '');
+    }
+  }, [camerasDisponiveis, cameraSelecionadaUid]);
 
-  const handleToggleEpi = (epi) => {
-    setEpisObrigatorios((prev) =>
-      prev.includes(epi) ? prev.filter((item) => item !== epi) : [...prev, epi]
+  useEffect(() => {
+    const elemento = previewStageRef.current;
+    if (!elemento || typeof ResizeObserver === 'undefined') return undefined;
+
+    const observer = new ResizeObserver(([entry]) => {
+      const rect = entry.contentRect;
+      setPreviewBox({ width: rect.width, height: rect.height });
+    });
+
+    observer.observe(elemento);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const sessionId = previewSessionRef.current;
+      if (sessionId) {
+        void camerasApi.pararPreview(sessionId).catch(() => {});
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!previewSessionId) return undefined;
+
+    let cancelado = false;
+    let executando = false;
+
+    const atualizarFrame = async () => {
+      if (cancelado || executando) return;
+      executando = true;
+
+      try {
+        const dados = await camerasApi.obterFramePreview(previewSessionId);
+        if (!cancelado && dados.frame_base64) {
+          setFrameSrc(`data:${dados.mime_type || 'image/jpeg'};base64,${dados.frame_base64}`);
+          setPreviewInfo((prev) => ({ ...prev, ...dados }));
+          setPreviewErro(null);
+        }
+      } catch (error) {
+        if (!cancelado) {
+          setPreviewErro(mensagemApi(error));
+        }
+      } finally {
+        executando = false;
+      }
+    };
+
+    void atualizarFrame();
+    const timer = window.setInterval(atualizarFrame, 300);
+
+    return () => {
+      cancelado = true;
+      window.clearInterval(timer);
+    };
+  }, [previewSessionId]);
+
+  useEffect(() => {
+    const canvas = zoomCanvasRef.current;
+    if (!canvas || !frameSrc || !roi?.largura || !roi?.altura) return;
+
+    const imagem = new Image();
+    imagem.onload = () => {
+      const larguraSaida = Math.min(720, Math.max(1, Math.round(roi.largura)));
+      const alturaSaida = Math.max(
+        1,
+        Math.round(larguraSaida * (roi.altura / roi.largura))
+      );
+
+      canvas.width = larguraSaida;
+      canvas.height = alturaSaida;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(
+        imagem,
+        roi.x,
+        roi.y,
+        roi.largura,
+        roi.altura,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+    };
+    imagem.src = frameSrc;
+  }, [frameSrc, roi]);
+
+  const cameraSelecionada =
+    camerasDisponiveis.find((camera) => camera.camera_uid === cameraSelecionadaUid) || null;
+
+  const cameraOnline = cameraSelecionada
+    ? Boolean(cameraSelecionada.online) || String(cameraSelecionada.status).toUpperCase() === 'ONLINE'
+    : false;
+
+  const larguraFonte =
+    frameSize.width || previewInfo?.largura || cameraSelecionada?.largura || 0;
+  const alturaFonte =
+    frameSize.height || previewInfo?.altura || cameraSelecionada?.altura || 0;
+
+  const calcularGeometriaImagem = () => {
+    if (!larguraFonte || !alturaFonte || !previewBox.width || !previewBox.height) {
+      return null;
+    }
+
+    const escala = Math.min(
+      previewBox.width / larguraFonte,
+      previewBox.height / alturaFonte
     );
+    const larguraExibida = larguraFonte * escala;
+    const alturaExibida = alturaFonte * escala;
+
+    return {
+      escala,
+      offsetX: (previewBox.width - larguraExibida) / 2,
+      offsetY: (previewBox.height - alturaExibida) / 2,
+      larguraExibida,
+      alturaExibida,
+    };
   };
 
-  const handleSalvar = (e) => {
-    e.preventDefault();
-    if (!nomeAmbiente) return;
-    onSalvarAmbiente({
-      nome: nomeAmbiente,
-      camera: cameraVinculada || 'Sem câmera associada',
-      descricao,
-      epis: episObrigatorios,
+  const pontoDoEvento = (event) => {
+    const elemento = previewStageRef.current;
+    const geometria = calcularGeometriaImagem();
+    if (!elemento || !geometria || !larguraFonte || !alturaFonte) return null;
+
+    const rect = elemento.getBoundingClientRect();
+    const localX = event.clientX - rect.left - geometria.offsetX;
+    const localY = event.clientY - rect.top - geometria.offsetY;
+
+    const x = Math.max(
+      0,
+      Math.min(larguraFonte, localX / geometria.escala)
+    );
+    const y = Math.max(
+      0,
+      Math.min(alturaFonte, localY / geometria.escala)
+    );
+
+    return { x, y };
+  };
+
+  const pararPreviewAtual = async () => {
+    const sessionId = previewSessionRef.current;
+    previewSessionRef.current = null;
+    setPreviewSessionId(null);
+
+    if (sessionId) {
+      try {
+        await camerasApi.pararPreview(sessionId);
+      } catch (error) {
+        if (error?.payload?.erro !== 'PREVIEW_NAO_ENCONTRADO') {
+          setPreviewErro(mensagemApi(error));
+        }
+      }
+    }
+  };
+
+  const iniciarPreviewCamera = async (cameraUid = cameraSelecionadaUid) => {
+    if (!cameraUid) return;
+
+    setIniciandoPreview(true);
+    setPreviewErro(null);
+
+    try {
+      await pararPreviewAtual();
+      const dados = await camerasApi.iniciarPreview(cameraUid);
+      previewSessionRef.current = dados.session_id;
+      setPreviewSessionId(dados.session_id);
+      setPreviewInfo(dados);
+    } catch (error) {
+      setPreviewErro(mensagemApi(error));
+    } finally {
+      setIniciandoPreview(false);
+    }
+  };
+
+  const handleTrocarCamera = async (novoUid) => {
+    if (novoUid === cameraSelecionadaUid) return;
+
+    await pararPreviewAtual();
+    setCameraSelecionadaUid(novoUid);
+    setFrameSrc(null);
+    setPreviewInfo(null);
+    setFrameSize({ width: 0, height: 0 });
+    setRoi(null);
+    setRoiConfirmada(false);
+    setModoSelecao(false);
+    setPreviewErro(null);
+    setAnaliseMaquinarioId(null);
+    setObjetosDetectados([]);
+    setIdsMaquinario([]);
+    setImagemMaquinarioSrc(null);
+    setMaquinarioConfirmado(false);
+    setEpisObrigatorios([]);
+    setEpisConfirmados(false);
+    setMatriculasSelecionadas([]);
+    setColaboradoresConfirmados(false);
+    setRevisaoDados(null);
+
+    if (etapaAtual >= 3) {
+      setEtapaAtual(2);
+    }
+
+    if (etapaAtual >= 2 && novoUid) {
+      await iniciarPreviewCamera(novoUid);
+    }
+  };
+
+  const handleContinuar = async () => {
+    setErro(null);
+
+    if (!nomeAmbiente.trim()) {
+      setErro('Informe o nome do ambiente.');
+      return;
+    }
+
+    if (descricao.trim().length > 500) {
+      setErro('A descrição deve possuir no máximo 500 caracteres.');
+      return;
+    }
+
+    if (!cameraSelecionadaUid) {
+      setErro('Selecione a câmera que será utilizada no monitoramento.');
+      return;
+    }
+
+    setEtapaAtual(2);
+    await iniciarPreviewCamera(cameraSelecionadaUid);
+  };
+
+  const handlePointerDown = (event) => {
+    if (!modoSelecao || !frameSrc) return;
+
+    const ponto = pontoDoEvento(event);
+    if (!ponto) return;
+
+    event.preventDefault();
+    previewStageRef.current?.setPointerCapture?.(event.pointerId);
+    setArrastandoRoi(true);
+    setInicioRoi(ponto);
+    setRoi({
+      x: Math.round(ponto.x),
+      y: Math.round(ponto.y),
+      largura: 1,
+      altura: 1,
+    });
+    setRoiConfirmada(false);
+  };
+
+  const handlePointerMove = (event) => {
+    if (!arrastandoRoi || !inicioRoi) return;
+
+    const ponto = pontoDoEvento(event);
+    if (!ponto) return;
+
+    const x = Math.min(inicioRoi.x, ponto.x);
+    const y = Math.min(inicioRoi.y, ponto.y);
+    const largura = Math.abs(ponto.x - inicioRoi.x);
+    const altura = Math.abs(ponto.y - inicioRoi.y);
+
+    setRoi({
+      x: Math.round(x),
+      y: Math.round(y),
+      largura: Math.max(1, Math.round(largura)),
+      altura: Math.max(1, Math.round(altura)),
     });
   };
 
+  const handlePointerUp = (event) => {
+    if (!arrastandoRoi) return;
+
+    previewStageRef.current?.releasePointerCapture?.(event.pointerId);
+    setArrastandoRoi(false);
+    setInicioRoi(null);
+    setModoSelecao(false);
+
+    if (!roi || roi.largura < 8 || roi.altura < 8) {
+      setRoi(null);
+      setErro('Selecione uma área maior na imagem.');
+    }
+  };
+
+  const handleAcaoPrincipalRoi = () => {
+    setErro(null);
+
+    if (!frameSrc) {
+      setErro('Aguarde a imagem da câmera antes de selecionar a área.');
+      return;
+    }
+
+    if (!roi) {
+      setModoSelecao(true);
+      setRoiConfirmada(false);
+      return;
+    }
+
+    if (!roiConfirmada) {
+      setRoiConfirmada(true);
+      setModoSelecao(false);
+      return;
+    }
+
+    setRoi(null);
+    setRoiConfirmada(false);
+    setModoSelecao(true);
+  };
+
+  const handleLimparRoi = () => {
+    setRoi(null);
+    setRoiConfirmada(false);
+    setModoSelecao(false);
+    setErro(null);
+  };
+
+  const handleRestaurarRoi = () => {
+    if (!larguraFonte || !alturaFonte) return;
+
+    setRoi({
+      x: 0,
+      y: 0,
+      largura: Math.round(larguraFonte),
+      altura: Math.round(alturaFonte),
+    });
+    setRoiConfirmada(false);
+    setModoSelecao(false);
+    setErro(null);
+  };
+
+  const normalizarRoiParaBackend = () => {
+    if (!roi || !larguraFonte || !alturaFonte) return null;
+
+    const limitar = (valor) => Math.max(0, Math.min(1, valor));
+
+    return {
+      x1: limitar(roi.x / larguraFonte),
+      y1: limitar(roi.y / alturaFonte),
+      x2: limitar((roi.x + roi.largura) / larguraFonte),
+      y2: limitar((roi.y + roi.altura) / alturaFonte),
+    };
+  };
+
+  const garantirAmbientePersistido = async () => {
+    const nome = nomeAmbiente.trim();
+    const descricaoNormalizada = descricao.trim();
+
+    if (!nome) {
+      throw new Error('NOME_AMBIENTE_OBRIGATORIO');
+    }
+
+    const camerasOriginais = Array.isArray(ambienteEmEdicao?.cameras)
+      ? ambienteEmEdicao.cameras
+          .map((camera) => camera?.camera_uid)
+          .filter(Boolean)
+      : [];
+
+    const cameraUids = Array.from(
+      new Set([...camerasOriginais, cameraSelecionadaUid].filter(Boolean))
+    );
+
+    const idAtual = ambienteIdFluxo || ambienteEmEdicao?.ambiente_id || null;
+
+    if (idAtual) {
+      await ambientesApi.editar(idAtual, {
+        nome,
+        descricao: descricaoNormalizada,
+        camera_uids: cameraUids,
+      });
+      setAmbienteIdFluxo(idAtual);
+      return idAtual;
+    }
+
+    const dados = await ambientesApi.criar({
+      nome,
+      descricao: descricaoNormalizada,
+      camera_uids: cameraUids,
+      epis_obrigatorios: [],
+    });
+
+    const novoId = dados?.ambiente?.ambiente_id || dados?.ambiente_id || null;
+
+    if (!novoId) {
+      throw new Error('AMBIENTE_ID_NAO_RETORNADO');
+    }
+
+    setAmbienteIdFluxo(novoId);
+    return novoId;
+  };
+
+  const handleAvancarMaquinario = async () => {
+    setErro(null);
+    setPreviewErro(null);
+
+    if (!roiConfirmada || !roi) {
+      setErro('Confirme a área de monitoramento antes de avançar.');
+      return;
+    }
+
+    if (!cameraSelecionadaUid || !previewSessionId) {
+      setErro('A câmera precisa estar com a transmissão ativa para analisar o maquinário.');
+      return;
+    }
+
+    const roiNormalizada = normalizarRoiParaBackend();
+    if (!roiNormalizada) {
+      setErro('Não foi possível normalizar a área selecionada.');
+      return;
+    }
+
+    setPreparandoMaquinario(true);
+    setMaquinarioConfirmado(false);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+
+      if (analiseMaquinarioId) {
+        try {
+          await ambientesApi.descartarAnaliseMaquinario(analiseMaquinarioId);
+        } catch {
+          // A análise temporária pode já ter expirado; uma nova será criada abaixo.
+        }
+      }
+
+      const ambienteId = await garantirAmbientePersistido();
+
+      await ambientesApi.definirRoi(
+        ambienteId,
+        cameraSelecionadaUid,
+        roiNormalizada
+      );
+
+      const analise = await ambientesApi.prepararMaquinario(ambienteId, {
+        sessoes_por_camera: {
+          [cameraSelecionadaUid]: previewSessionId,
+        },
+        qualidade_jpeg: 90,
+      });
+
+      const objetos = Array.isArray(analise?.objetos) ? analise.objetos : [];
+      const analiseCamera =
+        analise?.analises_cameras?.[cameraSelecionadaUid] ||
+        Object.values(analise?.analises_cameras || {})[0] ||
+        null;
+      const imagem = analiseCamera?.imagem_analisada || null;
+
+      setAnaliseMaquinarioId(analise?.analise_id || null);
+      setObjetosDetectados(objetos);
+      setIdsMaquinario([]);
+      setImagemMaquinarioSrc(
+        imagem?.frame_base64
+          ? `data:${imagem.mime_type || 'image/jpeg'};base64,${imagem.frame_base64}`
+          : frameSrc
+      );
+      setEtapaAtual(3);
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setPreparandoMaquinario(false);
+    }
+  };
+
+  const idDoObjeto = (objeto) =>
+    String(objeto?.id || objeto?.id_global || '').trim();
+
+  const handleToggleMaquinario = (objeto) => {
+    const id = idDoObjeto(objeto);
+    if (!id || maquinarioConfirmado) return;
+
+    setIdsMaquinario((prev) =>
+      prev.includes(id)
+        ? prev.filter((item) => item !== id)
+        : [...prev, id]
+    );
+  };
+
+  const handleConfirmarMaquinario = async () => {
+    setErro(null);
+
+    if (!ambienteIdFluxo || !analiseMaquinarioId) {
+      setErro('A análise de maquinário não está disponível. Execute a análise novamente.');
+      return;
+    }
+
+    setSalvandoMaquinario(true);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const resultado = await ambientesApi.salvarMaquinario(ambienteIdFluxo, {
+        analise_id: analiseMaquinarioId,
+        ids_maquinario: idsMaquinario,
+      });
+
+      setObjetosDetectados(
+        Array.isArray(resultado?.objetos) ? resultado.objetos : objetosDetectados
+      );
+      setAnaliseMaquinarioId(null);
+      setMaquinarioConfirmado(true);
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setSalvandoMaquinario(false);
+    }
+  };
+
+  const handleRefazerAnaliseMaquinario = async () => {
+    setIdsMaquinario([]);
+    setMaquinarioConfirmado(false);
+    setEpisConfirmados(false);
+    setColaboradoresConfirmados(false);
+    setRevisaoDados(null);
+    await handleAvancarMaquinario();
+  };
+
+  const valorEpi = (epi) =>
+    String(
+      typeof epi === 'string'
+        ? epi
+        : epi?.codigo || epi?.id || epi?.nome || epi?.label || ''
+    ).trim();
+
+  const rotuloEpi = (epi) =>
+    String(
+      typeof epi === 'string'
+        ? epi
+        : epi?.nome || epi?.label || epi?.codigo || epi?.id || ''
+    ).trim();
+
+  const carregarEtapaEpis = async () => {
+    if (!ambienteIdFluxo) {
+      setErro('O ambiente ainda não foi persistido.');
+      return false;
+    }
+
+    setEpisLoading(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const [catalogo, atuais] = await Promise.all([
+        ambientesApi.listarEpisDisponiveis(),
+        ambientesApi.obterEpis(ambienteIdFluxo).catch(() => null),
+      ]);
+
+      const listaCatalogo = Array.isArray(catalogo?.epis)
+        ? catalogo.epis
+        : Array.isArray(catalogo?.epis_disponiveis)
+          ? catalogo.epis_disponiveis
+          : [];
+
+      const listaAtuais = Array.isArray(atuais?.epis_obrigatorios)
+        ? atuais.epis_obrigatorios
+        : Array.isArray(atuais?.epis)
+          ? atuais.epis
+          : Array.isArray(ambienteEmEdicao?.epis_obrigatorios)
+            ? ambienteEmEdicao.epis_obrigatorios
+            : [];
+
+      setEpisDisponiveis(listaCatalogo);
+      setEpisObrigatorios(listaAtuais.map(valorEpi).filter(Boolean));
+      return true;
+    } catch (error) {
+      setErro(mensagemApi(error));
+      return false;
+    } finally {
+      setEpisLoading(false);
+    }
+  };
+
+  const handleContinuarParaEpis = async () => {
+    if (!maquinarioConfirmado) {
+      setErro('Confirme o maquinário antes de avançar.');
+      return;
+    }
+
+    const carregou = await carregarEtapaEpis();
+    if (carregou) setEtapaAtual(4);
+  };
+
+  const handleToggleEpiFluxo = (epi) => {
+    const valor = valorEpi(epi);
+    if (!valor) return;
+
+    setEpisObrigatorios((prev) =>
+      prev.includes(valor)
+        ? prev.filter((item) => item !== valor)
+        : [...prev, valor]
+    );
+    setEpisConfirmados(false);
+    setColaboradoresConfirmados(false);
+    setRevisaoDados(null);
+  };
+
+  const carregarEtapaColaboradores = async () => {
+    if (!ambienteIdFluxo) {
+      setErro('O ambiente ainda não foi persistido.');
+      return false;
+    }
+
+    setColaboradoresLoading(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const [disponiveis, atuais] = await Promise.all([
+        ambientesApi.listarColaboradoresDisponiveis(),
+        ambientesApi.obterColaboradores(ambienteIdFluxo).catch(() => null),
+      ]);
+
+      const listaDisponiveis = Array.isArray(disponiveis?.colaboradores)
+        ? disponiveis.colaboradores
+        : Array.isArray(disponiveis?.itens)
+          ? disponiveis.itens
+          : [];
+
+      const listaAtuais = Array.isArray(atuais?.matriculas)
+        ? atuais.matriculas
+        : Array.isArray(atuais?.colaboradores)
+          ? atuais.colaboradores.map((item) => item?.matricula || item).filter(Boolean)
+          : [];
+
+      setColaboradoresDisponiveis(listaDisponiveis);
+      setMatriculasSelecionadas(listaAtuais.map((item) => String(item).trim()).filter(Boolean));
+      return true;
+    } catch (error) {
+      setErro(mensagemApi(error));
+      return false;
+    } finally {
+      setColaboradoresLoading(false);
+    }
+  };
+
+  const handleSalvarEpisEAvancar = async () => {
+    if (!ambienteIdFluxo) return;
+
+    setSalvandoEpis(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      await ambientesApi.definirEpis(ambienteIdFluxo, episObrigatorios);
+      setEpisConfirmados(true);
+
+      const carregou = await carregarEtapaColaboradores();
+      if (carregou) setEtapaAtual(5);
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setSalvandoEpis(false);
+    }
+  };
+
+  const matriculaColaborador = (colaborador) =>
+    String(colaborador?.matricula || colaborador?.id || '').trim();
+
+  const nomeColaborador = (colaborador) =>
+    String(colaborador?.nome || colaborador?.nome_completo || matriculaColaborador(colaborador) || 'Colaborador');
+
+  const handleToggleColaborador = (colaborador) => {
+    const matricula = matriculaColaborador(colaborador);
+    if (!matricula) return;
+
+    setMatriculasSelecionadas((prev) =>
+      prev.includes(matricula)
+        ? prev.filter((item) => item !== matricula)
+        : [...prev, matricula]
+    );
+    setColaboradoresConfirmados(false);
+    setRevisaoDados(null);
+  };
+
+  const carregarRevisao = async () => {
+    if (!ambienteIdFluxo) return false;
+
+    setRevisaoLoading(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      const dados = await ambientesApi.revisao(ambienteIdFluxo);
+      setRevisaoDados(dados || {});
+      return true;
+    } catch (error) {
+      setErro(mensagemApi(error));
+      return false;
+    } finally {
+      setRevisaoLoading(false);
+    }
+  };
+
+  const handleSalvarColaboradoresEAvancar = async () => {
+    if (!ambienteIdFluxo) return;
+
+    setSalvandoColaboradores(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+      await ambientesApi.definirColaboradores(ambienteIdFluxo, matriculasSelecionadas);
+      setColaboradoresConfirmados(true);
+
+      const carregou = await carregarRevisao();
+      if (carregou) setEtapaAtual(6);
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setSalvandoColaboradores(false);
+    }
+  };
+
+  const handleFinalizarAmbiente = async () => {
+    if (!ambienteIdFluxo) return;
+
+    setFinalizandoAmbiente(true);
+    setErro(null);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+
+      // Atualiza a revisão imediatamente antes da finalização para não usar dados antigos.
+      const revisaoAtual = await ambientesApi.revisao(ambienteIdFluxo);
+      setRevisaoDados(revisaoAtual || {});
+
+      await ambientesApi.finalizar(ambienteIdFluxo);
+      await pararPreviewAtual();
+      alert(ambienteEmEdicao ? 'Ambiente atualizado e finalizado com sucesso!' : 'Ambiente cadastrado e finalizado com sucesso!');
+      await onConcluirAmbiente?.();
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setFinalizandoAmbiente(false);
+    }
+  };
+
+  const colaboradoresFiltrados = colaboradoresDisponiveis.filter((colaborador) => {
+    const termo = buscaColaboradorAmbiente.trim().toLowerCase();
+    if (!termo) return true;
+    return (
+      nomeColaborador(colaborador).toLowerCase().includes(termo) ||
+      matriculaColaborador(colaborador).toLowerCase().includes(termo)
+    );
+  });
+
+  const pendenciasRevisao = Array.isArray(revisaoDados?.pendencias)
+    ? revisaoDados.pendencias
+    : Array.isArray(revisaoDados?.revisao?.pendencias)
+      ? revisaoDados.revisao.pendencias
+      : [];
+
+  const geometriaImagem = calcularGeometriaImagem();
+  const estiloRoi =
+    roi && geometriaImagem
+      ? {
+          left: `${geometriaImagem.offsetX + roi.x * geometriaImagem.escala}px`,
+          top: `${geometriaImagem.offsetY + roi.y * geometriaImagem.escala}px`,
+          width: `${roi.largura * geometriaImagem.escala}px`,
+          height: `${roi.altura * geometriaImagem.escala}px`,
+        }
+      : null;
+
+  const calcularProporcao = () => {
+    if (!roi?.largura || !roi?.altura) return '—';
+
+    const mdc = (a, b) => {
+      let x = Math.max(1, Math.round(a));
+      let y = Math.max(1, Math.round(b));
+      while (y) {
+        const resto = x % y;
+        x = y;
+        y = resto;
+      }
+      return x;
+    };
+
+    const divisor = mdc(roi.largura, roi.altura);
+    const w = Math.round(roi.largura / divisor);
+    const h = Math.round(roi.altura / divisor);
+
+    if (w > 50 || h > 50) {
+      return `${(roi.largura / roi.altura).toFixed(2)}:1`;
+    }
+
+    return `${w}:${h}`;
+  };
+
+  const textoBotaoRoi = !roi
+    ? modoSelecao
+      ? 'Arraste na Imagem'
+      : 'Selecionar Área'
+    : roiConfirmada
+      ? 'Selecionar Novamente'
+      : 'Confirmar Área';
+
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="max-w-[1500px] mx-auto space-y-4">
+      {/* Cabeçalho da tela */}
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900">
-            {ambienteEmEdicao
-              ? 'Editar Informações do Ambiente'
-              : 'Cadastro de Ambiente'}
+          <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium mb-2">
+            <span>Ambientes</span>
+            <ChevronRight className="w-3 h-3" />
+            <span className="text-slate-700 font-semibold">
+              {ambienteEmEdicao ? 'Editar Ambiente' : 'Cadastro de Ambiente'}
+            </span>
+          </div>
+          <h2 className="text-2xl font-bold text-slate-950">
+            {ambienteEmEdicao ? 'Editar Ambiente' : 'Cadastro de Ambiente'}
           </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            {ambienteEmEdicao
-              ? `Modifique as configurações e regras de segurança para ${ambienteEmEdicao.nome}`
-              : 'Defina as zonas fabris e configure as regras de EPIs obrigatórios exigidos no local'}
+          <p className="text-sm text-slate-500 mt-1">
+            Configure uma área para monitoramento e detecção de EPI.
           </p>
         </div>
 
@@ -1329,7 +3444,7 @@ function CadastroAmbienteView({
           <button
             type="button"
             onClick={onCancelarEdicao}
-            className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors flex items-center gap-1.5"
+            className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg hover:bg-white transition-colors flex items-center gap-1.5"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             Cancelar Edição
@@ -1337,250 +3452,1183 @@ function CadastroAmbienteView({
         )}
       </div>
 
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-        <form onSubmit={handleSalvar} className="space-y-5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {/* Etapas superiores */}
+      <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 shadow-sm">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-3 md:gap-0">
+          {etapas.map((etapa, index) => {
+            const concluida =
+              etapa.numero < etapaAtual ||
+              (etapa.numero === 2 && roiConfirmada && etapaAtual === 2) ||
+              (etapa.numero === 3 && maquinarioConfirmado);
+            const ativa = etapa.numero === etapaAtual && !concluida;
+
+            return (
+              <div key={etapa.numero} className="relative flex items-center md:pr-4">
+                <div
+                  className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-xs font-bold border-2 z-10 ${
+                    concluida
+                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                      : ativa
+                        ? 'bg-[#FF7412] border-[#FF7412] text-white shadow-sm'
+                        : 'bg-slate-100 border-slate-200 text-slate-500'
+                  }`}
+                >
+                  {concluida ? <CheckCircle2 className="w-4 h-4" /> : etapa.numero}
+                </div>
+                <div className="ml-2 min-w-0">
+                  <span
+                    className={`block text-[11px] font-semibold truncate ${
+                      ativa || concluida ? 'text-slate-900' : 'text-slate-500'
+                    }`}
+                  >
+                    {etapa.titulo}
+                  </span>
+                </div>
+                {index < etapas.length - 1 && (
+                  <div className="hidden md:block absolute left-[calc(100%-18px)] right-0 top-4 h-px bg-slate-200" />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {(erro || previewErro) && (
+        <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{erro || previewErro}</span>
+        </div>
+      )}
+
+      {/* Conteúdo principal em três colunas */}
+      <div className="grid grid-cols-1 xl:grid-cols-[1.05fr_1.35fr_0.72fr] gap-4 items-stretch">
+        {/* Coluna 1 — Dados do Ambiente */}
+        <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+          <div className="flex items-start gap-3 mb-5">
+            <div
+              className={`w-9 h-9 rounded-full text-white flex items-center justify-center text-sm font-bold shrink-0 ${
+                etapaAtual > 1 ? 'bg-emerald-500' : 'bg-[#FF7412]'
+              }`}
+            >
+              {etapaAtual > 1 ? <CheckCircle2 className="w-5 h-5" /> : 1}
+            </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Nome do Setor / Ambiente *
+              <h3 className="text-base font-bold text-slate-900">Dados do Ambiente</h3>
+              <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                Informe as informações básicas e selecione a câmera que será utilizada.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4 flex-1">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Nome do ambiente <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
-                required
-                placeholder="Ex: Área de Soldagem e Usinagem"
                 value={nomeAmbiente}
                 onChange={(e) => setNomeAmbiente(e.target.value)}
-                className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
+                placeholder="Ex: Área de Soldagem 01"
+                className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Câmera para Monitoramento
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-semibold text-slate-700">Descrição</label>
+                <span className="text-[10px] text-slate-400">{descricao.length}/500</span>
+              </div>
+              <textarea
+                rows="4"
+                maxLength={500}
+                value={descricao}
+                onChange={(e) => setDescricao(e.target.value)}
+                placeholder="Descreva o ambiente, atividade realizada e riscos principais."
+                className="w-full text-xs bg-white border border-slate-300 rounded-lg px-3 py-2.5 resize-none focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Câmera para monitoramento <span className="text-red-500">*</span>
               </label>
-              <select
-                value={cameraVinculada}
-                onChange={(e) => setCameraVinculada(e.target.value)}
-                className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-              >
-                <option value="">Selecione uma câmera cadastrada...</option>
-                {camerasDisponiveis.map((c) => (
-                  <option key={c.id} value={c.nome}>
-                    {c.nome} ({c.ip})
-                  </option>
-                ))}
-              </select>
+              <div className="relative">
+                <select
+                  value={cameraSelecionadaUid}
+                  onChange={(e) => void handleTrocarCamera(e.target.value)}
+                  className="w-full appearance-none text-xs bg-white border border-slate-300 rounded-lg pl-9 pr-9 py-2.5 focus:border-[#FF7412] focus:ring-2 focus:ring-orange-100 focus:outline-none"
+                >
+                  <option value="">Selecione uma câmera</option>
+                  {camerasDisponiveis.map((camera) => (
+                    <option key={camera.camera_uid} value={camera.camera_uid}>
+                      {camera.nome || camera.camera_uid}
+                    </option>
+                  ))}
+                </select>
+                <Camera className="w-4 h-4 text-[#FF7412] absolute left-3 top-2.5" />
+                <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
+              </div>
+            </div>
+
+            {cameraSelecionada ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                <div className="flex gap-3">
+                  <div className="w-24 h-16 rounded-lg bg-slate-900 flex items-center justify-center shrink-0 overflow-hidden">
+                    {frameSrc ? (
+                      <img src={frameSrc} alt="Miniatura da câmera" className="w-full h-full object-cover" />
+                    ) : (
+                      <Camera className="w-7 h-7 text-slate-500" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-bold text-slate-900 block truncate">
+                          {cameraSelecionada.nome || 'Câmera selecionada'}
+                        </span>
+                        <span className="text-[10px] text-slate-500 uppercase block mt-0.5">
+                          {cameraSelecionada.tipo || 'Tipo não informado'}
+                        </span>
+                      </div>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold shrink-0 ${
+                          previewSessionId || cameraOnline
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : 'bg-slate-200 text-slate-600'
+                        }`}
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            previewSessionId || cameraOnline ? 'bg-emerald-500' : 'bg-slate-400'
+                          }`}
+                        />
+                        {previewSessionId ? 'Online' : cameraSelecionada.status || (cameraOnline ? 'Online' : 'Offline')}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-[10px] text-slate-500">
+                      <span>
+                        Resolução:{' '}
+                        <strong className="text-slate-700 font-semibold">
+                          {larguraFonte && alturaFonte
+                            ? `${larguraFonte} × ${alturaFonte}`
+                            : '-'}
+                        </strong>
+                      </span>
+                      <span>
+                        FPS:{' '}
+                        <strong className="text-slate-700 font-semibold">
+                          {previewInfo?.fps ?? cameraSelecionada.fps ?? '-'}
+                        </strong>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center">
+                <Camera className="w-5 h-5 text-slate-400 mx-auto mb-1.5" />
+                <p className="text-[11px] text-slate-500">
+                  Selecione uma câmera cadastrada para preparar a área de monitoramento.
+                </p>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 flex gap-2.5">
+              <div className="w-5 h-5 rounded-full bg-blue-500 text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                i
+              </div>
+              <p className="text-[10px] text-blue-700 leading-relaxed">
+                A imagem da câmera será utilizada para definir a área de monitoramento nas próximas etapas.
+              </p>
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Descrição do Ambiente e Riscos
-            </label>
-            <textarea
-              rows="2"
-              placeholder="Ex: Zona de faíscas e temperatura elevada. Monitoramento constante de proteção facial e ocular."
-              value={descricao}
-              onChange={(e) => setDescricao(e.target.value)}
-              className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-            />
+          <div className="flex items-center justify-between gap-3 mt-5 pt-4 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={onCancelarEdicao}
+              className="px-5 py-2.5 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold transition-colors"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleContinuar()}
+              disabled={iniciandoPreview}
+              className="px-5 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-60 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-2"
+            >
+              {iniciandoPreview ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : etapaAtual > 1 ? (
+                <RefreshCw className="w-4 h-4" />
+              ) : null}
+              {iniciandoPreview ? 'Abrindo câmera...' : etapaAtual > 1 ? 'Atualizar Câmera' : 'Continuar'}
+              {!iniciandoPreview && etapaAtual === 1 && <ArrowRight className="w-4 h-4" />}
+            </button>
           </div>
+        </section>
 
-          <div className="pt-2 border-t border-slate-100">
-            <div className="flex items-center gap-2 mb-1">
-              <ShieldCheck className="w-4 h-4 text-[#FF7412]" />
-              <label className="text-xs font-bold text-slate-800">
-                EPIs de Uso Obrigatório Neste Setor
-              </label>
-            </div>
-            <p className="text-[11px] text-slate-500 mb-3">
-              Colaboradores identificados neste setor sem estes itens
-              selecionados gerarão ocorrências automáticas.
-            </p>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-              {listaEpisDisponiveis.map((epi) => {
-                const selecionado = episObrigatorios.includes(epi);
-                return (
-                  <button
-                    type="button"
-                    key={epi}
-                    onClick={() => handleToggleEpi(epi)}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs text-left transition-all ${
-                      selecionado
-                        ? 'bg-orange-50 border-[#FF7412] text-slate-900 font-medium shadow-xs'
-                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300'
+        {etapaAtual === 3 ? (
+          <>
+            {/* Coluna 2 — Maquinário */}
+            <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div className="flex items-start gap-3">
+                  <div
+                    className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
+                      maquinarioConfirmado
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-[#FF7412] text-white'
                     }`}
                   >
+                    {maquinarioConfirmado ? <CheckCircle2 className="w-5 h-5" /> : 3}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">Maquinário</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      A IA detecta os objetos; você confirma manualmente quais são maquinários.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => void handleRefazerAnaliseMaquinario()}
+                  disabled={preparandoMaquinario || salvandoMaquinario}
+                  className="px-3 py-2 border border-slate-300 hover:bg-slate-50 rounded-lg text-[10px] font-semibold text-slate-600 flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${preparandoMaquinario ? 'animate-spin' : ''}`} />
+                  Refazer análise
+                </button>
+              </div>
+
+              <div className="relative flex-1 min-h-[430px] rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center">
+                {imagemMaquinarioSrc ? (
+                  <img
+                    src={imagemMaquinarioSrc}
+                    alt="Análise de objetos para seleção de maquinário"
+                    className="absolute inset-0 w-full h-full object-contain"
+                  />
+                ) : (
+                  <div className="text-center px-8">
+                    <Cpu className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                    <p className="text-xs font-semibold text-slate-300">
+                      Nenhuma imagem de análise disponível
+                    </p>
+                  </div>
+                )}
+
+                <div className="absolute top-3 left-3 rounded-lg bg-black/65 border border-white/10 px-3 py-1.5 text-[10px] text-white flex items-center gap-2">
+                  <Cpu className="w-3.5 h-3.5 text-[#FF7412]" />
+                  {objetosDetectados.length} objeto(s) detectado(s)
+                </div>
+
+                <div className="absolute top-3 right-3 rounded-lg bg-black/65 border border-white/10 px-3 py-1.5 text-[10px] text-white">
+                  {cameraSelecionada?.nome || 'Câmera'}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 mt-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                  <span className="block text-[9px] uppercase font-bold text-slate-400">Detectados</span>
+                  <strong className="text-lg text-slate-900">{objetosDetectados.length}</strong>
+                </div>
+                <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5">
+                  <span className="block text-[9px] uppercase font-bold text-orange-500">Selecionados</span>
+                  <strong className="text-lg text-orange-700">{idsMaquinario.length}</strong>
+                </div>
+                <div className={`rounded-lg border px-3 py-2.5 ${maquinarioConfirmado ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
+                  <span className={`block text-[9px] uppercase font-bold ${maquinarioConfirmado ? 'text-emerald-500' : 'text-slate-400'}`}>Status</span>
+                  <strong className={`text-xs ${maquinarioConfirmado ? 'text-emerald-700' : 'text-slate-700'}`}>
+                    {maquinarioConfirmado ? 'Confirmado' : 'Aguardando confirmação'}
+                  </strong>
+                </div>
+              </div>
+            </section>
+
+            {/* Coluna 3 — Seleção de maquinário */}
+            <aside className="space-y-4">
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <h3 className="text-xs font-bold text-slate-900">Objetos Detectados</h3>
+                  <span className="text-[9px] text-slate-400">Seleção manual</span>
+                </div>
+
+                {objetosDetectados.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center">
+                    <Cpu className="w-5 h-5 text-slate-400 mx-auto mb-1.5" />
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Nenhum objeto foi detectado. Você pode confirmar a etapa sem selecionar maquinário.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[390px] overflow-y-auto pr-1">
+                    {objetosDetectados.map((objeto, index) => {
+                      const id = idDoObjeto(objeto);
+                      const selecionado = idsMaquinario.includes(id);
+                      const camerasObjeto = Array.isArray(objeto?.cameras) ? objeto.cameras : [];
+
+                      return (
+                        <button
+                          type="button"
+                          key={id || `objeto-${index}`}
+                          onClick={() => handleToggleMaquinario(objeto)}
+                          disabled={!id || maquinarioConfirmado}
+                          className={`w-full p-3 rounded-lg border text-left transition-all disabled:cursor-default ${
+                            selecionado
+                              ? 'border-[#FF7412] bg-orange-50'
+                              : 'border-slate-200 bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <div
+                              className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 mt-0.5 ${
+                                selecionado
+                                  ? 'bg-[#FF7412] border-[#FF7412] text-white'
+                                  : 'border-slate-300 bg-white'
+                              }`}
+                            >
+                              {selecionado && <CheckCircle2 className="w-3 h-3" />}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-[11px] font-bold text-slate-900 block truncate">
+                                {objeto?.nome || `Objeto ${objeto?.numero ?? index + 1}`}
+                              </span>
+                              <span className="text-[9px] text-slate-400 block mt-0.5 truncate">
+                                ID: {id || 'não informado'}
+                              </span>
+                              {camerasObjeto.length > 0 && (
+                                <span className="text-[9px] text-slate-500 block mt-1">
+                                  {camerasObjeto.length} câmera(s)
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 flex gap-2.5 mt-4">
+                  <div className="w-5 h-5 rounded-full bg-blue-500 text-white text-[11px] font-bold flex items-center justify-center shrink-0">i</div>
+                  <p className="text-[10px] text-blue-700 leading-relaxed">
+                    O backend detecta objetos, mas não decide quais são máquinas. Essa classificação depende da sua seleção.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmarMaquinario()}
+                  disabled={salvandoMaquinario || maquinarioConfirmado || !ambienteIdFluxo}
+                  className={`w-full mt-4 py-2.5 rounded-lg text-[11px] font-semibold text-white flex items-center justify-center gap-2 transition-colors disabled:opacity-55 disabled:cursor-not-allowed ${
+                    maquinarioConfirmado
+                      ? 'bg-emerald-600'
+                      : 'bg-[#FF7412] hover:bg-[#e0620a]'
+                  }`}
+                >
+                  {salvandoMaquinario ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : maquinarioConfirmado ? (
+                    <CheckCircle2 className="w-4 h-4" />
+                  ) : (
+                    <Cpu className="w-4 h-4" />
+                  )}
+                  {salvandoMaquinario
+                    ? 'Salvando seleção...'
+                    : maquinarioConfirmado
+                      ? 'Maquinário Confirmado'
+                      : idsMaquinario.length > 0
+                        ? `Confirmar ${idsMaquinario.length} Maquinário(s)`
+                        : 'Confirmar sem Maquinário'}
+                </button>
+              </div>
+
+              <div className={`border rounded-xl shadow-sm p-4 ${maquinarioConfirmado ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`flex items-center gap-2 ${maquinarioConfirmado ? 'text-emerald-700' : 'text-slate-600'}`}>
+                  {maquinarioConfirmado ? (
+                    <CheckCircle2 className="w-5 h-5 shrink-0" />
+                  ) : (
+                    <Clock className="w-5 h-5 shrink-0" />
+                  )}
+                  <span className="text-xs font-bold">
+                    {maquinarioConfirmado ? 'Etapa 3 concluída' : 'Etapa 3 em andamento'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-relaxed mt-2">
+                  {maquinarioConfirmado
+                    ? 'A seleção foi persistida no ambiente. O próximo passo será definir os EPIs obrigatórios.'
+                    : 'Selecione os objetos que representam maquinários e confirme a decisão.'}
+                </p>
+                {maquinarioConfirmado && (
+                  <button
+                    type="button"
+                    onClick={() => void handleContinuarParaEpis()}
+                    disabled={episLoading}
+                    className="w-full mt-3 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-55 text-white rounded-lg text-[11px] font-semibold flex items-center justify-center gap-2"
+                  >
+                    {episLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                    {episLoading ? 'Carregando EPIs...' : 'Continuar para EPIs'}
+                    {!episLoading && <ArrowRight className="w-4 h-4" />}
+                  </button>
+                )}
+              </div>
+            </aside>
+          </>
+        ) : etapaAtual === 4 ? (
+          <>
+            <section className="xl:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+              <div className="flex items-start justify-between gap-3 mb-5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-full bg-[#FF7412] text-white flex items-center justify-center text-sm font-bold shrink-0">4</div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">EPIs Obrigatórios</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Selecione os EPIs exigidos para este ambiente.</p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-semibold text-slate-500">{episObrigatorios.length} selecionado(s)</span>
+              </div>
+
+              {episLoading ? (
+                <div className="flex-1 min-h-[380px] flex items-center justify-center text-slate-500 text-xs">
+                  <RefreshCw className="w-5 h-5 animate-spin mr-2 text-[#FF7412]" /> Carregando catálogo de EPIs...
+                </div>
+              ) : episDisponiveis.length === 0 ? (
+                <div className="flex-1 min-h-[380px] rounded-xl border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-center p-8">
+                  <div>
+                    <ShieldCheck className="w-10 h-10 text-slate-400 mx-auto mb-3" />
+                    <p className="text-xs font-semibold text-slate-700">Nenhum EPI disponível no catálogo</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Você ainda pode salvar esta etapa sem EPIs.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 content-start">
+                  {episDisponiveis.map((epi, index) => {
+                    const valor = valorEpi(epi);
+                    const selecionado = episObrigatorios.includes(valor);
+                    return (
+                      <button
+                        type="button"
+                        key={valor || `epi-${index}`}
+                        onClick={() => handleToggleEpiFluxo(epi)}
+                        className={`p-4 rounded-xl border text-left transition-all ${
+                          selecionado
+                            ? 'border-[#FF7412] bg-orange-50 shadow-sm'
+                            : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
+                            selecionado ? 'bg-[#FF7412] border-[#FF7412] text-white' : 'border-slate-300 bg-white'
+                          }`}>
+                            {selecionado && <CheckCircle2 className="w-3.5 h-3.5" />}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="block text-xs font-bold text-slate-900">{rotuloEpi(epi) || valor}</span>
+                            {typeof epi !== 'string' && epi?.descricao && (
+                              <span className="block text-[10px] text-slate-500 mt-1 line-clamp-2">{epi.descricao}</span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="mt-auto pt-5 flex justify-between gap-3">
+                <button type="button" onClick={() => setEtapaAtual(3)} className="px-4 py-2.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50">Voltar</button>
+                <button
+                  type="button"
+                  onClick={() => void handleSalvarEpisEAvancar()}
+                  disabled={salvandoEpis || episLoading}
+                  className="px-5 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-55 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
+                >
+                  {salvandoEpis && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  {salvandoEpis ? 'Salvando EPIs...' : 'Salvar e continuar'}
+                  {!salvandoEpis && <ArrowRight className="w-4 h-4" />}
+                </button>
+              </div>
+            </section>
+          </>
+        ) : etapaAtual === 5 ? (
+          <>
+            <section className="xl:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-full bg-[#FF7412] text-white flex items-center justify-center text-sm font-bold shrink-0">5</div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">Colaboradores</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Vincule os colaboradores que atuam neste ambiente.</p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-semibold text-slate-500">{matriculasSelecionadas.length} selecionado(s)</span>
+              </div>
+
+              <div className="relative mb-4">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  value={buscaColaboradorAmbiente}
+                  onChange={(e) => setBuscaColaboradorAmbiente(e.target.value)}
+                  placeholder="Buscar por nome ou matrícula..."
+                  className="w-full text-xs pl-9 pr-4 py-2.5 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-[#FF7412]"
+                />
+              </div>
+
+              {colaboradoresLoading ? (
+                <div className="flex-1 min-h-[360px] flex items-center justify-center text-xs text-slate-500">
+                  <RefreshCw className="w-5 h-5 animate-spin mr-2 text-[#FF7412]" /> Carregando colaboradores...
+                </div>
+              ) : colaboradoresFiltrados.length === 0 ? (
+                <div className="flex-1 min-h-[360px] rounded-xl border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-center p-8">
+                  <div>
+                    <Users className="w-10 h-10 text-slate-400 mx-auto mb-3" />
+                    <p className="text-xs font-semibold text-slate-700">Nenhum colaborador encontrado</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Você pode continuar sem vincular colaboradores.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[430px] overflow-y-auto pr-1">
+                  {colaboradoresFiltrados.map((colaborador, index) => {
+                    const matricula = matriculaColaborador(colaborador);
+                    const selecionado = matriculasSelecionadas.includes(matricula);
+                    return (
+                      <button
+                        type="button"
+                        key={matricula || `colaborador-${index}`}
+                        onClick={() => handleToggleColaborador(colaborador)}
+                        className={`p-3.5 rounded-xl border text-left transition-all ${
+                          selecionado ? 'border-[#FF7412] bg-orange-50' : 'border-slate-200 bg-white hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
+                            selecionado ? 'bg-[#FF7412] text-white' : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {nomeColaborador(colaborador).charAt(0).toUpperCase()}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="block text-xs font-bold text-slate-900 truncate">{nomeColaborador(colaborador)}</span>
+                            <span className="block text-[10px] text-slate-500 font-mono mt-0.5">{matricula || 'Sem matrícula'}</span>
+                          </div>
+                          <div className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
+                            selecionado ? 'bg-[#FF7412] border-[#FF7412] text-white' : 'border-slate-300 bg-white'
+                          }`}>
+                            {selecionado && <CheckCircle2 className="w-3.5 h-3.5" />}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="mt-auto pt-5 flex justify-between gap-3">
+                <button type="button" onClick={() => setEtapaAtual(4)} className="px-4 py-2.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50">Voltar</button>
+                <button
+                  type="button"
+                  onClick={() => void handleSalvarColaboradoresEAvancar()}
+                  disabled={salvandoColaboradores || colaboradoresLoading}
+                  className="px-5 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-55 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
+                >
+                  {salvandoColaboradores && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  {salvandoColaboradores ? 'Salvando vínculos...' : 'Salvar e revisar'}
+                  {!salvandoColaboradores && <ArrowRight className="w-4 h-4" />}
+                </button>
+              </div>
+            </section>
+          </>
+        ) : etapaAtual === 6 ? (
+          <>
+            <section className="xl:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+              <div className="flex items-start justify-between gap-3 mb-5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-full bg-[#FF7412] text-white flex items-center justify-center text-sm font-bold shrink-0">6</div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">Revisão</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Confira a configuração completa antes de finalizar.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void carregarRevisao()}
+                  disabled={revisaoLoading}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-[10px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${revisaoLoading ? 'animate-spin' : ''}`} /> Atualizar revisão
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <h4 className="text-xs font-bold text-slate-900 mb-3 flex items-center gap-2"><Layers className="w-4 h-4 text-[#FF7412]" /> Ambiente</h4>
+                  <div className="space-y-2 text-[11px]">
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Nome</span><strong className="text-slate-800 text-right">{nomeAmbiente}</strong></div>
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Câmera</span><strong className="text-slate-800 text-right">{cameraSelecionada?.nome || cameraSelecionadaUid}</strong></div>
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Área</span><strong className="text-emerald-700">Confirmada</strong></div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <h4 className="text-xs font-bold text-slate-900 mb-3 flex items-center gap-2"><Cpu className="w-4 h-4 text-[#FF7412]" /> Maquinário</h4>
+                  <div className="space-y-2 text-[11px]">
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Selecionados</span><strong className="text-slate-800">{idsMaquinario.length}</strong></div>
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Status</span><strong className="text-emerald-700">Confirmado</strong></div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <h4 className="text-xs font-bold text-slate-900 mb-3 flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-[#FF7412]" /> EPIs</h4>
+                  {episObrigatorios.length === 0 ? (
+                    <p className="text-[10px] text-slate-500">Nenhum EPI obrigatório selecionado.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {episObrigatorios.map((epi) => <span key={epi} className="px-2 py-1 rounded-full bg-orange-50 border border-orange-200 text-[9px] font-semibold text-orange-700">{epi}</span>)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <h4 className="text-xs font-bold text-slate-900 mb-3 flex items-center gap-2"><Users className="w-4 h-4 text-[#FF7412]" /> Colaboradores</h4>
+                  <div className="text-2xl font-bold text-slate-900">{matriculasSelecionadas.length}</div>
+                  <p className="text-[10px] text-slate-500 mt-1">colaborador(es) vinculado(s)</p>
+                </div>
+              </div>
+
+              <div className={`mt-4 rounded-xl border p-4 ${pendenciasRevisao.length ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                <div className="flex items-start gap-3">
+                  {revisaoLoading ? (
+                    <RefreshCw className="w-5 h-5 animate-spin text-[#FF7412] shrink-0" />
+                  ) : pendenciasRevisao.length ? (
+                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  )}
+                  <div>
+                    <span className={`text-xs font-bold ${pendenciasRevisao.length ? 'text-amber-900' : 'text-emerald-900'}`}>
+                      {revisaoLoading ? 'Atualizando revisão...' : pendenciasRevisao.length ? 'Pendências encontradas pelo backend' : 'Revisão pronta para finalização'}
+                    </span>
+                    {pendenciasRevisao.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {pendenciasRevisao.map((item, index) => (
+                          <div key={`${String(item)}-${index}`} className="text-[10px] text-amber-800">• {typeof item === 'string' ? item : item?.mensagem || item?.erro || JSON.stringify(item)}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 flex justify-between gap-3">
+                <button type="button" onClick={() => setEtapaAtual(5)} className="px-4 py-2.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50">Voltar</button>
+                <button
+                  type="button"
+                  onClick={() => void handleFinalizarAmbiente()}
+                  disabled={finalizandoAmbiente || revisaoLoading}
+                  className="px-6 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-55 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-sm"
+                >
+                  {finalizandoAmbiente ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  {finalizandoAmbiente ? 'Finalizando...' : 'Finalizar Ambiente'}
+                </button>
+              </div>
+            </section>
+          </>
+        ) : (
+          <>
+            {/* Coluna 2 — Área de Monitoramento */}
+            <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 flex flex-col">
+              <div className="flex items-start gap-3 mb-4">
+                <div
+                  className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
+                    etapaAtual === 2
+                      ? 'bg-[#FF7412] text-white'
+                      : 'bg-slate-100 border border-slate-200 text-slate-500'
+                  }`}
+                >
+                  2
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Área de Monitoramento</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Selecione e ajuste a área da imagem que será monitorada.
+                  </p>
+                </div>
+              </div>
+
+              <div
+                ref={previewStageRef}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                className={`relative flex-1 min-h-[370px] rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center select-none ${
+                  modoSelecao ? 'cursor-crosshair' : 'cursor-default'
+                }`}
+              >
+                {frameSrc ? (
+                  <img
+                    src={frameSrc}
+                    alt="Área de monitoramento da câmera"
+                    draggable={false}
+                    onLoad={(event) => {
+                      setFrameSize({
+                        width: event.currentTarget.naturalWidth,
+                        height: event.currentTarget.naturalHeight,
+                      });
+                    }}
+                    className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                  />
+                ) : (
+                  <div className="text-center px-8">
+                    {iniciandoPreview ? (
+                      <RefreshCw className="w-12 h-12 text-[#FF7412] mx-auto mb-3 animate-spin" />
+                    ) : (
+                      <Camera className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                    )}
+                    <p className="text-xs font-semibold text-slate-300">
+                      {etapaAtual < 2
+                        ? 'Clique em Continuar para abrir a câmera'
+                        : iniciandoPreview
+                          ? 'Abrindo transmissão da câmera...'
+                          : 'Aguardando imagem da câmera...'}
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Depois, clique em Selecionar Área e arraste sobre a imagem.
+                    </p>
+                  </div>
+                )}
+
+                {estiloRoi && (
+                  <div
+                    className={`absolute border-2 ${
+                      roiConfirmada
+                        ? 'border-emerald-400 bg-emerald-400/15'
+                        : 'border-[#FF7412] bg-[#FF7412]/15'
+                    } pointer-events-none`}
+                    style={estiloRoi}
+                  >
                     <div
-                      className={`w-4 h-4 rounded flex items-center justify-center text-white text-[10px] ${
-                        selecionado
-                          ? 'bg-[#FF7412]'
-                          : 'border border-slate-300 bg-white'
+                      className={`absolute -top-7 left-0 px-2 py-1 rounded text-[9px] font-bold text-white whitespace-nowrap ${
+                        roiConfirmada ? 'bg-emerald-600' : 'bg-[#FF7412]'
                       }`}
                     >
-                      {selecionado && '✓'}
+                      {roiConfirmada ? 'Área Confirmada' : 'Área de Monitoramento'}
                     </div>
-                    <span>{epi}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+                  </div>
+                )}
 
-          <div className="pt-3 flex items-center gap-3">
-            <button
-              type="submit"
-              className="px-6 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold shadow-sm transition-colors"
-            >
-              {ambienteEmEdicao
-                ? 'Atualizar Alterações'
-                : 'Salvar Ambiente e Regras'}
-            </button>
+                <div className="absolute top-3 left-3 inline-flex items-center gap-2 rounded-lg bg-black/60 border border-white/10 px-3 py-1.5 text-[10px] text-white pointer-events-none">
+                  <span className={`w-2 h-2 rounded-full ${previewSessionId ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+                  {cameraSelecionada?.nome || 'Nenhuma câmera selecionada'}
+                </div>
 
-            {ambienteEmEdicao && (
-              <button
-                type="button"
-                onClick={onCancelarEdicao}
-                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition-colors"
+                <div className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-lg bg-black/60 border border-white/10 px-3 py-1.5 text-[10px] font-bold text-white pointer-events-none">
+                  <span className={`w-2 h-2 rounded-full ${previewSessionId ? 'bg-red-500' : 'bg-slate-500'}`} />
+                  {previewSessionId ? 'AO VIVO' : 'PARADO'}
+                </div>
+
+                {modoSelecao && frameSrc && (
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-lg bg-black/70 border border-white/10 px-3 py-1.5 text-[10px] font-semibold text-white pointer-events-none">
+                    Clique e arraste para marcar a área
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-2.5 mt-3">
+                <button
+                  type="button"
+                  onClick={handleAcaoPrincipalRoi}
+                  disabled={etapaAtual < 2 || !frameSrc || iniciandoPreview}
+                  className={`py-2.5 rounded-lg text-[11px] font-semibold transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
+                    roiConfirmada
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                      : 'bg-[#FF7412] hover:bg-[#e0620a] text-white'
+                  }`}
+                >
+                  {textoBotaoRoi}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLimparRoi}
+                  disabled={!roi}
+                  className="py-2.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-[11px] font-semibold disabled:opacity-45 disabled:cursor-not-allowed"
+                >
+                  Limpar Seleção
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRestaurarRoi}
+                  disabled={!frameSrc || !larguraFonte || !alturaFonte}
+                  className="py-2.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-[11px] font-semibold disabled:opacity-45 disabled:cursor-not-allowed"
+                >
+                  Restaurar
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5">
+                  <span className="block text-[10px] font-bold text-slate-700 mb-2">Imagem Original</span>
+                  <div className="aspect-video rounded-lg bg-slate-950 border border-slate-200 overflow-hidden flex items-center justify-center">
+                    {frameSrc ? (
+                      <img src={frameSrc} alt="Imagem original" className="w-full h-full object-contain" />
+                    ) : (
+                      <Camera className="w-6 h-6 text-slate-500" />
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5">
+                  <span className="block text-[10px] font-bold text-slate-700 mb-2">Área Selecionada (Zoom)</span>
+                  <div className="aspect-video rounded-lg bg-slate-950 border border-slate-200 overflow-hidden flex items-center justify-center">
+                    {frameSrc && roi ? (
+                      <canvas
+                        ref={zoomCanvasRef}
+                        className="w-full h-full object-contain bg-black"
+                      />
+                    ) : (
+                      <Maximize2 className="w-6 h-6 text-slate-500" />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {roiConfirmada && (
+                <button
+                  type="button"
+                  onClick={() => void handleAvancarMaquinario()}
+                  disabled={preparandoMaquinario || !previewSessionId}
+                  className="w-full mt-3 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] disabled:opacity-55 text-white rounded-lg text-[11px] font-semibold flex items-center justify-center gap-2"
+                >
+                  {preparandoMaquinario ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Cpu className="w-4 h-4" />
+                  )}
+                  {preparandoMaquinario ? 'Analisando área...' : 'Continuar para Maquinário'}
+                  {!preparandoMaquinario && <ArrowRight className="w-4 h-4" />}
+                </button>
+              )}
+            </section>
+
+            {/* Coluna 3 — Informações da seleção */}
+            <aside className="space-y-4">
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <h3 className="text-xs font-bold text-slate-900 mb-4">Informações da Seleção</h3>
+                <div className="space-y-2 text-[10px] text-slate-500">
+                  <div className="flex justify-between gap-3"><span>X:</span><strong className="text-slate-700">{roi ? roi.x : '—'}</strong></div>
+                  <div className="flex justify-between gap-3"><span>Y:</span><strong className="text-slate-700">{roi ? roi.y : '—'}</strong></div>
+                  <div className="flex justify-between gap-3"><span>Largura:</span><strong className="text-slate-700">{roi ? roi.largura : '—'}</strong></div>
+                  <div className="flex justify-between gap-3"><span>Altura:</span><strong className="text-slate-700">{roi ? roi.altura : '—'}</strong></div>
+                  <div className="flex justify-between gap-3"><span>Proporção:</span><strong className="text-slate-700">{calcularProporcao()}</strong></div>
+                </div>
+
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 flex gap-2.5 mt-4">
+                  <div className="w-5 h-5 rounded-full bg-blue-500 text-white text-[11px] font-bold flex items-center justify-center shrink-0">i</div>
+                  <p className="text-[10px] text-blue-700 leading-relaxed">
+                    A área selecionada será utilizada para detecção de maquinário, EPIs e colaboradores.
+                  </p>
+                </div>
+              </div>
+
+              <div
+                className={`border rounded-xl shadow-sm p-4 ${
+                  roiConfirmada
+                    ? 'bg-emerald-50 border-emerald-200'
+                    : roi
+                      ? 'bg-amber-50 border-amber-200'
+                      : 'bg-slate-50 border-slate-200'
+                }`}
               >
-                Cancelar
-              </button>
-            )}
-          </div>
-        </form>
+                <h3
+                  className={`text-xs font-bold mb-3 ${
+                    roiConfirmada
+                      ? 'text-emerald-900'
+                      : roi
+                        ? 'text-amber-900'
+                        : 'text-slate-700'
+                  }`}
+                >
+                  Pré-visualização da área
+                </h3>
+                <div
+                  className={`space-y-2 text-[10px] ${
+                    roiConfirmada
+                      ? 'text-emerald-700'
+                      : roi
+                        ? 'text-amber-700'
+                        : 'text-slate-500'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>
+                      {roiConfirmada
+                        ? 'Área válida e confirmada para monitoramento'
+                        : roi
+                          ? 'Área selecionada — confirme para continuar'
+                          : 'Aguardando definição da área'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>
+                      {frameSrc
+                        ? 'Imagem da câmera disponível para seleção'
+                        : 'Aguardando imagem da câmera'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {roiConfirmada && (
+                <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                  <div className="flex items-center gap-2 text-emerald-700 mb-2">
+                    <CheckCircle2 className="w-5 h-5" />
+                    <span className="text-xs font-bold">Etapa 2 concluída</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 leading-relaxed">
+                    Ao avançar, o ambiente e a ROI serão persistidos para permitir a análise de maquinário no backend.
+                  </p>
+                </div>
+              )}
+            </aside>
+          </>
+        )}
+      </div>
+
+      {/* Barra inferior das etapas */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="grid grid-cols-1 md:grid-cols-6 divide-y md:divide-y-0 md:divide-x divide-slate-200">
+          {etapas.map((etapa) => {
+            const concluida =
+              etapa.numero < etapaAtual ||
+              (etapa.numero === 2 && roiConfirmada) ||
+              (etapa.numero === 3 && maquinarioConfirmado);
+            const ativa = etapa.numero === etapaAtual && !concluida;
+
+            return (
+              <div key={etapa.numero} className="p-3.5 flex items-start gap-2.5 min-h-[78px]">
+                <div
+                  className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                    concluida
+                      ? 'bg-emerald-500 text-white'
+                      : ativa
+                        ? 'bg-[#FF7412] text-white'
+                        : 'bg-slate-100 border border-slate-200 text-slate-500'
+                  }`}
+                >
+                  {concluida ? <CheckCircle2 className="w-4 h-4" /> : etapa.numero}
+                </div>
+                <div className="min-w-0">
+                  <span
+                    className={`block text-[10px] font-bold ${
+                      concluida || ativa ? 'text-slate-900' : 'text-slate-700'
+                    }`}
+                  >
+                    {etapa.titulo}
+                  </span>
+                  <span className="block text-[9px] leading-relaxed text-slate-400 mt-1">
+                    {etapa.numero === 2 && roiConfirmada
+                      ? 'Área confirmada'
+                      : etapa.numero === 3 && maquinarioConfirmado
+                        ? 'Seleção confirmada'
+                        : etapa.resumo}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
 }
 
-// 6. CONSULTA DE AMBIENTES (COM CLIQUES PARA EDITAR E APAGAR COM MODAL)
+// 6. CONSULTA DE AMBIENTES — dados reais do backend
 function ConsultaAmbientesView({
   ambientes,
+  loading,
+  erro,
+  onRefresh,
   onEditarAmbiente,
   onDeletarAmbiente,
   onNavigate,
 }) {
   const [ambienteParaRemover, setAmbienteParaRemover] = useState(null);
+  const [removendo, setRemovendo] = useState(false);
+  const [erroRemocao, setErroRemocao] = useState(null);
 
-  const confirmarExclusao = () => {
-    if (ambienteParaRemover) {
-      onDeletarAmbiente(ambienteParaRemover.id);
+  const confirmarExclusao = async () => {
+    if (!ambienteParaRemover?.ambiente_id) return;
+
+    setRemovendo(true);
+    setErroRemocao(null);
+    const resultado = await onDeletarAmbiente(ambienteParaRemover.ambiente_id);
+    setRemovendo(false);
+
+    if (resultado?.sucesso) {
       setAmbienteParaRemover(null);
+    } else {
+      setErroRemocao(resultado?.erro || 'Não foi possível remover o ambiente.');
     }
+  };
+
+  const statusClass = (status) => {
+    const valor = String(status || '').toUpperCase();
+    if (valor === 'ATIVO') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+    if (valor === 'COM_PROBLEMA') return 'bg-amber-50 text-amber-700 border-amber-200';
+    return 'bg-slate-100 text-slate-600 border-slate-200';
   };
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-900">
             Ambientes Cadastrados
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Clique em um ambiente para editar suas informações ou gerencie as
-            regras
+            Dados carregados diretamente da API de Ambientes
           </p>
         </div>
-        <button
-          onClick={() => onNavigate('cadastro-ambiente')}
-          className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-sm"
-        >
-          <PlusCircle className="w-4 h-4" />
-          Novo Ambiente
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => void onRefresh()}
+            disabled={loading}
+            className="px-3 py-2 bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-60"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Atualizar
+          </button>
+          <button
+            onClick={() => onNavigate('cadastro-ambiente')}
+            className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-sm"
+          >
+            <PlusCircle className="w-4 h-4" />
+            Novo Ambiente
+          </button>
+        </div>
       </div>
 
-      {ambientes.length === 0 ? (
+      {erro && (
+        <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{erro}</span>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 flex items-center justify-center gap-2 text-sm text-slate-500">
+          <RefreshCw className="w-5 h-5 animate-spin" />
+          Carregando ambientes...
+        </div>
+      ) : ambientes.length === 0 ? (
         <EmptyState
           icon={Layers}
           title="Nenhum ambiente configurado"
-          description="Cadastre os setores de operação para associar câmeras e definir as regras de EPIs obrigatórios."
+          description="Cadastre os setores de operação e defina as regras de monitoramento."
           actionText="Cadastrar Primeiro Ambiente"
           onAction={() => onNavigate('cadastro-ambiente')}
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {ambientes.map((a) => (
-            <div
-              key={a.id}
-              className="group bg-white p-5 rounded-xl border border-slate-200 hover:border-[#FF7412]/60 hover:shadow-md transition-all flex flex-col justify-between relative cursor-pointer"
-              onClick={() => onEditarAmbiente(a)}
-            >
-              <div>
-                <div className="flex items-start justify-between gap-2">
-                  <h4 className="font-bold text-slate-900 text-sm group-hover:text-[#FF7412] transition-colors">
-                    {a.nome}
-                  </h4>
-                  <div
-                    className="flex items-center gap-1 shrink-0"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onEditarAmbiente(a)}
-                      className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
-                      title="Editar Ambiente"
+          {ambientes.map((a) => {
+            const cameraNome =
+              a.camera_principal?.nome ||
+              (a.quantidade_cameras > 0
+                ? `${a.quantidade_cameras} câmera(s) vinculada(s)`
+                : 'Sem câmera associada');
+
+            return (
+              <div
+                key={a.ambiente_id}
+                className="group bg-white p-5 rounded-xl border border-slate-200 hover:border-[#FF7412]/60 hover:shadow-md transition-all flex flex-col justify-between relative cursor-pointer"
+                onClick={() => void onEditarAmbiente(a)}
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-slate-900 text-sm group-hover:text-[#FF7412] transition-colors truncate">
+                        {a.nome}
+                      </h4>
+                      <span
+                        className={`inline-flex mt-1 px-2 py-0.5 rounded-full border text-[9px] font-bold ${statusClass(a.status)}`}
+                      >
+                        {a.status || 'INATIVO'}
+                      </span>
+                    </div>
+                    <div
+                      className="flex items-center gap-1 shrink-0"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAmbienteParaRemover(a)}
-                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
-                      title="Apagar Ambiente"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => void onEditarAmbiente(a)}
+                        className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
+                        title="Editar Ambiente"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setErroRemocao(null);
+                          setAmbienteParaRemover(a);
+                        }}
+                        className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                        title="Apagar Ambiente"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <span className="text-[11px] text-[#FF7412] font-semibold mt-2 flex items-center gap-1">
+                    <Camera className="w-3.5 h-3.5" />
+                    {cameraNome}
+                  </span>
+
+                  <p className="text-xs text-slate-500 mt-2 line-clamp-2">
+                    {a.descricao || 'Sem observações adicionais.'}
+                  </p>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <span className="block text-sm font-bold text-slate-800">
+                      {a.quantidade_epis ?? 0}
+                    </span>
+                    <span className="text-[9px] uppercase text-slate-400 font-semibold">
+                      EPIs
+                    </span>
+                  </div>
+                  <div>
+                    <span className="block text-sm font-bold text-slate-800">
+                      {a.quantidade_colaboradores ?? 0}
+                    </span>
+                    <span className="text-[9px] uppercase text-slate-400 font-semibold">
+                      Pessoas
+                    </span>
+                  </div>
+                  <div>
+                    <span className="block text-sm font-bold text-slate-800">
+                      {a.infracoes_hoje ?? 0}
+                    </span>
+                    <span className="text-[9px] uppercase text-slate-400 font-semibold">
+                      Infrações
+                    </span>
                   </div>
                 </div>
-
-                <span className="text-[11px] text-[#FF7412] font-semibold block mt-1 flex items-center gap-1">
-                  <Camera className="w-3.5 h-3.5" />
-                  {a.camera}
-                </span>
-
-                <p className="text-xs text-slate-500 mt-2 line-clamp-2">
-                  {a.descricao || 'Sem observações adicionais.'}
-                </p>
               </div>
-
-              {/* EPIs Obrigatórios no card */}
-              <div className="mt-4 pt-3 border-t border-slate-100">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">
-                    EPIs Obrigatórios
-                  </span>
-                  <span className="text-[10px] text-slate-400 group-hover:text-[#FF7412] font-semibold flex items-center gap-0.5 transition-colors">
-                    Editar <ChevronRight className="w-3 h-3" />
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {a.epis && a.epis.length > 0 ? (
-                    a.epis.map((epi, idx) => (
-                      <span
-                        key={idx}
-                        className="px-1.5 py-0.5 rounded bg-orange-50 text-[#FF7412] text-[10px] font-semibold border border-orange-200"
-                      >
-                        {epi}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-[11px] text-slate-400 italic">
-                      Nenhum EPI configurado
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* MODAL DE CONFIRMAÇÃO DE EXCLUSÃO DE AMBIENTE */}
       {ambienteParaRemover && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-4">
             <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
               <Trash2 className="w-6 h-6" />
             </div>
@@ -1596,26 +4644,31 @@ function ConsultaAmbientesView({
                 </strong>
                 ?
               </p>
-              <p className="text-[11px] text-red-500 mt-1">
-                As regras de monitoramento de EPI deste setor deixarão de ser
-                vigiadas pela IA.
-              </p>
             </div>
+
+            {erroRemocao && (
+              <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs">
+                {erroRemocao}
+              </div>
+            )}
 
             <div className="flex gap-3 pt-2">
               <button
                 type="button"
+                disabled={removendo}
                 onClick={() => setAmbienteParaRemover(null)}
-                className="flex-1 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                className="flex-1 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors disabled:opacity-60"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                onClick={confirmarExclusao}
-                className="flex-1 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
+                disabled={removendo}
+                onClick={() => void confirmarExclusao()}
+                className="flex-1 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
               >
-                Sim, Remover
+                {removendo && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                {removendo ? 'Removendo...' : 'Sim, Remover'}
               </button>
             </div>
           </div>
@@ -1628,50 +4681,89 @@ function ConsultaAmbientesView({
 // 7. VISÃO GERAL DE COLABORADORES
 function ConsultaColaboradoresView({
   colaboradores,
+  loading,
+  erro,
+  onRefresh,
   onDeletarColaborador,
   onNavigate,
 }) {
   const [busca, setBusca] = useState('');
   const [colaboradorParaRemover, setColaboradorParaRemover] = useState(null);
+  const [removendo, setRemovendo] = useState(false);
 
-  const filtrados = colaboradores.filter(
-    (c) =>
-      c.nome.toLowerCase().includes(busca.toLowerCase()) ||
-      c.matricula.toLowerCase().includes(busca.toLowerCase())
-  );
+  const termo = busca.trim().toLowerCase();
+  const filtrados = colaboradores.filter((c) => {
+    if (!termo) return true;
+    return (
+      String(c?.nome || '').toLowerCase().includes(termo) ||
+      String(c?.matricula || '').toLowerCase().includes(termo) ||
+      String(c?.cargo || '').toLowerCase().includes(termo) ||
+      String(c?.setor || '').toLowerCase().includes(termo)
+    );
+  });
 
-  const confirmarExclusao = () => {
-    if (colaboradorParaRemover) {
-      onDeletarColaborador(colaboradorParaRemover.id);
+  const confirmarExclusao = async () => {
+    if (!colaboradorParaRemover?.matricula) return;
+
+    setRemovendo(true);
+    try {
+      const resultado = await onDeletarColaborador(colaboradorParaRemover.matricula);
+      if (!resultado?.sucesso) {
+        alert(resultado?.erro || 'Não foi possível remover o colaborador.');
+        return;
+      }
       setColaboradorParaRemover(null);
+    } finally {
+      setRemovendo(false);
     }
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900">
-            Quadro de Colaboradores
-          </h2>
+          <h2 className="text-xl font-bold text-slate-900">Quadro de Colaboradores</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Lista de funcionários cadastrados no banco de dados
+            Colaboradores persistidos no backend e disponíveis para biometria.
           </p>
         </div>
-        <button
-          onClick={() => onNavigate('cadastro-colaborador')}
-          className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 self-start shadow-sm"
-        >
-          <UserPlus className="w-4 h-4" />
-          Cadastrar Colaborador
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => void onRefresh()}
+            disabled={loading}
+            className="px-4 py-2 border border-slate-300 hover:bg-slate-100 rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Atualizar
+          </button>
+          <button
+            onClick={() => onNavigate('cadastro-colaborador')}
+            className="px-4 py-2 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-sm"
+          >
+            <UserPlus className="w-4 h-4" />
+            Cadastrar Colaborador
+          </button>
+        </div>
       </div>
 
-      {colaboradores.length === 0 ? (
+      {erro && (
+        <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          {erro}
+        </div>
+      )}
+
+      {loading && colaboradores.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-sm text-slate-500">
+          <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-3 text-[#FF7412]" />
+          Carregando colaboradores do backend...
+        </div>
+      ) : colaboradores.length === 0 ? (
         <EmptyState
           icon={Users}
           title="Nenhum colaborador registrado"
-          description="Cadastre os funcionários com foto, nome e matrícula para alimentar os dados do sistema."
+          description="Cadastre o primeiro colaborador e suas referências biométricas."
           actionText="Cadastrar Primeiro Colaborador"
           onAction={() => onNavigate('cadastro-colaborador')}
         />
@@ -1682,7 +4774,7 @@ function ConsultaColaboradoresView({
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Buscar por nome ou matrícula..."
+                placeholder="Buscar por nome, matrícula, cargo ou setor..."
                 value={busca}
                 onChange={(e) => setBusca(e.target.value)}
                 className="w-full text-xs pl-9 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-[#FF7412]"
@@ -1693,105 +4785,112 @@ function ConsultaColaboradoresView({
             </span>
           </div>
 
-          <table className="w-full text-left text-xs text-slate-600">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase text-[10px] tracking-wider">
-              <tr>
-                <th className="py-3.5 px-4">Colaborador</th>
-                <th className="py-3.5 px-4">Matrícula</th>
-                <th className="py-3.5 px-4 text-right">Ações</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filtrados.map((c) => (
-                <tr
-                  key={c.id}
-                  className="hover:bg-slate-50/80 transition-colors"
-                >
-                  <td className="py-3 px-4 flex items-center gap-3">
-                    {c.foto ? (
-                      <img
-                        src={c.foto}
-                        alt={c.nome}
-                        className="w-10 h-10 rounded-full object-cover border border-slate-300 shadow-xs shrink-0"
-                      />
-                    ) : (
-                      <div className="w-10 h-10 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs shrink-0">
-                        {c.nome.charAt(0)}
-                      </div>
-                    )}
-                    <div>
-                      <span className="font-semibold text-slate-900 block text-sm">
-                        {c.nome}
-                      </span>
-                      <span className="text-[11px] text-slate-400">
-                        Ativo no sistema
-                      </span>
-                    </div>
-                  </td>
-                  <td className="py-3 px-4 font-mono font-medium text-slate-700">
-                    {c.matricula}
-                  </td>
-                  <td className="py-3 px-4 text-right space-x-2">
-                    <button
-                      type="button"
-                      onClick={() => alert(`Editar colaborador: ${c.nome}`)}
-                      className="text-slate-400 hover:text-slate-800 p-1.5 rounded hover:bg-slate-100 transition-colors"
-                      title="Editar Colaborador"
-                    >
-                      <Edit className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setColaboradorParaRemover(c)}
-                      className="text-red-400 hover:text-red-600 p-1.5 rounded hover:bg-red-50 transition-colors"
-                      title="Remover Colaborador"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-slate-600">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase text-[10px] tracking-wider">
+                <tr>
+                  <th className="py-3.5 px-4">Colaborador</th>
+                  <th className="py-3.5 px-4">Matrícula</th>
+                  <th className="py-3.5 px-4">Cargo / Setor</th>
+                  <th className="py-3.5 px-4">Biometria</th>
+                  <th className="py-3.5 px-4 text-right">Ações</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filtrados.map((c) => (
+                  <tr key={c.matricula} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-3">
+                        {c.foto ? (
+                          <img
+                            src={c.foto}
+                            alt={c.nome}
+                            className="w-10 h-10 rounded-full object-cover border border-slate-300 shadow-xs shrink-0"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs shrink-0">
+                            {String(c.nome || '?').charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                        <div>
+                          <span className="font-semibold text-slate-900 block text-sm">{c.nome}</span>
+                          <span className="text-[11px] text-slate-400">Ativo no sistema</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="py-3 px-4 font-mono font-medium text-slate-700">{c.matricula}</td>
+                    <td className="py-3 px-4">
+                      <span className="font-semibold text-slate-700 block">{c.cargo || '-'}</span>
+                      <span className="text-[10px] text-slate-400">{c.setor || 'Setor não informado'}</span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-semibold ${
+                        c.biometria_cadastrada
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-amber-100 text-amber-700'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${c.biometria_cadastrada ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                        {c.biometria_cadastrada
+                          ? `${c.quantidade_biometrias || 1} referência(s)`
+                          : 'Sem biometria'}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-right space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => alert(`Edição de ${c.nome} será tratada na próxima etapa.`)}
+                        className="text-slate-400 hover:text-slate-800 p-1.5 rounded hover:bg-slate-100 transition-colors"
+                        title="Editar Colaborador"
+                      >
+                        <Edit className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setColaboradorParaRemover(c)}
+                        className="text-red-400 hover:text-red-600 p-1.5 rounded hover:bg-red-50 transition-colors"
+                        title="Remover Colaborador"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      {/* MODAL DE CONFIRMAÇÃO DE EXCLUSÃO DE COLABORADOR */}
       {colaboradorParaRemover && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-4">
             <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
               <Trash2 className="w-6 h-6" />
             </div>
-
             <div className="text-center">
-              <h3 className="text-base font-bold text-slate-900">
-                Remover Colaborador?
-              </h3>
+              <h3 className="text-base font-bold text-slate-900">Remover Colaborador?</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Tem certeza que deseja excluir{' '}
-                <strong className="text-slate-800">
-                  {colaboradorParaRemover.nome}
-                </strong>{' '}
-                (Matrícula: {colaboradorParaRemover.matricula}) do banco de
-                dados?
+                Remover <strong className="text-slate-800">{colaboradorParaRemover.nome}</strong>{' '}
+                (Matrícula: {colaboradorParaRemover.matricula})?
               </p>
             </div>
-
             <div className="flex gap-3 pt-2">
               <button
                 type="button"
+                disabled={removendo}
                 onClick={() => setColaboradorParaRemover(null)}
-                className="flex-1 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                className="flex-1 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                onClick={confirmarExclusao}
-                className="flex-1 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
+                disabled={removendo}
+                onClick={() => void confirmarExclusao()}
+                className="flex-1 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                Sim, Remover
+                {removendo && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                {removendo ? 'Removendo...' : 'Sim, Remover'}
               </button>
             </div>
           </div>
@@ -1801,141 +4900,537 @@ function ConsultaColaboradoresView({
   );
 }
 
-// 8. CADASTRO DE COLABORADOR
-function CadastroColaboradorView({ onCadastrarColaborador }) {
+// 8. CADASTRO DE COLABORADOR — 3 REFERÊNCIAS BIOMÉTRICAS
+function CadastroColaboradorView({
+  cameras,
+  camerasLoading,
+  onCadastrarColaborador,
+}) {
   const [nome, setNome] = useState('');
   const [matricula, setMatricula] = useState('');
-  const [fotoPreview, setFotoPreview] = useState(null);
+  const [cargo, setCargo] = useState('');
+  const [setor, setSetor] = useState('');
+  const [cameraUid, setCameraUid] = useState('');
 
-  const handleFotoUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setFotoPreview(reader.result);
-      };
-      reader.readAsDataURL(file);
+  const [sessionId, setSessionId] = useState(null);
+  const [frameSrc, setFrameSrc] = useState(null);
+  const [previewInfo, setPreviewInfo] = useState(null);
+  const [previewErro, setPreviewErro] = useState(null);
+  const [iniciandoPreview, setIniciandoPreview] = useState(false);
+
+  const [capturas, setCapturas] = useState({
+    frontal: null,
+    esquerda: null,
+    direita: null,
+  });
+  const [capturando, setCapturando] = useState(null);
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState(null);
+
+  const previewSessionRef = React.useRef(null);
+
+  const referencias = [
+    {
+      id: 'frontal',
+      titulo: 'Frente',
+      instrucao: 'Olhe diretamente para a câmera, com o rosto centralizado.',
+    },
+    {
+      id: 'esquerda',
+      titulo: 'Esquerda',
+      instrucao: 'Vire levemente o rosto para a esquerda, mantendo os olhos visíveis.',
+    },
+    {
+      id: 'direita',
+      titulo: 'Direita',
+      instrucao: 'Vire levemente o rosto para a direita, mantendo os olhos visíveis.',
+    },
+  ];
+
+  useEffect(() => {
+    if (!cameraUid && cameras?.[0]?.camera_uid) {
+      setCameraUid(cameras[0].camera_uid);
+    }
+  }, [cameras, cameraUid]);
+
+  const pararPreview = async () => {
+    const atual = previewSessionRef.current;
+    previewSessionRef.current = null;
+    setSessionId(null);
+    setFrameSrc(null);
+    setPreviewInfo(null);
+
+    if (!atual) return;
+
+    try {
+      await camerasApi.pararPreview(atual);
+    } catch (error) {
+      if (error?.payload?.erro !== 'PREVIEW_NAO_ENCONTRADO') {
+        setPreviewErro(mensagemApi(error));
+      }
     }
   };
 
-  const handleRemoverFoto = () => {
-    setFotoPreview(null);
+  useEffect(() => {
+    return () => {
+      const atual = previewSessionRef.current;
+      if (atual) {
+        void camerasApi.pararPreview(atual).catch(() => {});
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId) return undefined;
+
+    let cancelado = false;
+    let executando = false;
+
+    const atualizarFrame = async () => {
+      if (cancelado || executando) return;
+      executando = true;
+
+      try {
+        const dados = await camerasApi.obterFramePreview(sessionId);
+        if (!cancelado && dados?.frame_base64) {
+          setFrameSrc(`data:${dados.mime_type || 'image/jpeg'};base64,${dados.frame_base64}`);
+          setPreviewInfo((anterior) => ({ ...anterior, ...dados }));
+          setPreviewErro(null);
+        }
+      } catch (error) {
+        if (!cancelado) setPreviewErro(mensagemApi(error));
+      } finally {
+        executando = false;
+      }
+    };
+
+    void atualizarFrame();
+    const timer = window.setInterval(atualizarFrame, 300);
+
+    return () => {
+      cancelado = true;
+      window.clearInterval(timer);
+    };
+  }, [sessionId]);
+
+  const iniciarPreview = async () => {
+    if (!cameraUid) {
+      setErro('Selecione uma câmera cadastrada.');
+      return;
+    }
+
+    setIniciandoPreview(true);
+    setErro(null);
+    setPreviewErro(null);
+
+    try {
+      await pararPreview();
+      const dados = await camerasApi.iniciarPreview(cameraUid);
+      previewSessionRef.current = dados.session_id;
+      setSessionId(dados.session_id);
+      setPreviewInfo(dados);
+    } catch (error) {
+      setPreviewErro(mensagemApi(error));
+    } finally {
+      setIniciandoPreview(false);
+    }
   };
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!nome || !matricula) return;
-
-    onCadastrarColaborador({
-      id: Date.now(),
-      nome,
-      matricula,
-      foto: fotoPreview,
-    });
+  const trocarCamera = async (novoUid) => {
+    if (novoUid === cameraUid) return;
+    await pararPreview();
+    setCameraUid(novoUid);
+    setPreviewErro(null);
+    setCapturas({ frontal: null, esquerda: null, direita: null });
   };
+
+  const dataUrlParaBlob = async (dataUrl) => {
+    const resposta = await fetch(dataUrl);
+    return resposta.blob();
+  };
+
+  const capturarReferencia = (referencia) => {
+    if (!frameSrc) {
+      setErro('Inicie a câmera e aguarde a imagem antes de capturar.');
+      return;
+    }
+
+    const snapshot = frameSrc;
+    const frameSeq = previewInfo?.frame_seq ?? null;
+
+    const frameJaUsado = Object.entries(capturas).some(
+      ([chave, captura]) =>
+        chave !== referencia &&
+        captura?.frameSeq !== null &&
+        frameSeq !== null &&
+        captura?.frameSeq === frameSeq
+    );
+
+    if (frameJaUsado) {
+      setErro('Aguarde a câmera atualizar a imagem antes de fazer a próxima captura.');
+      return;
+    }
+
+    setErro(null);
+    setCapturando(referencia);
+
+    setCapturas((anteriores) => ({
+      ...anteriores,
+      [referencia]: {
+        src: snapshot,
+        frameSeq,
+      },
+    }));
+
+    window.setTimeout(() => {
+      setCapturando(null);
+    }, 120);
+  };
+
+  const removerCaptura = (referencia) => {
+    setCapturas((anteriores) => ({
+      ...anteriores,
+      [referencia]: null,
+    }));
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setErro(null);
+
+    if (!nome.trim()) {
+      setErro('Informe o nome completo.');
+      return;
+    }
+    if (!matricula.trim()) {
+      setErro('Informe a matrícula.');
+      return;
+    }
+    if (!cargo.trim()) {
+      setErro('Informe o cargo ou função.');
+      return;
+    }
+
+    const faltantes = referencias
+      .filter((item) => !capturas[item.id])
+      .map((item) => item.titulo);
+
+    if (faltantes.length) {
+      setErro(`Capture as três referências biométricas. Faltando: ${faltantes.join(', ')}.`);
+      return;
+    }
+
+    setSalvando(true);
+
+    try {
+      setApiContext({ perfil: 'GERENCIAL' });
+
+      // Libera a câmera antes da validação biométrica pesada no backend.
+      // As três fotos já estão preservadas em `capturas`.
+      await pararPreview();
+
+      const [frontal, esquerda, direita] = await Promise.all([
+        dataUrlParaBlob(capturas.frontal.src),
+        dataUrlParaBlob(capturas.esquerda.src),
+        dataUrlParaBlob(capturas.direita.src),
+      ]);
+
+      await colaboradoresApi.cadastrar({
+        matricula: matricula.trim(),
+        nome: nome.trim(),
+        cargo: cargo.trim(),
+        setor: setor.trim(),
+        frontal,
+        esquerda,
+        direita,
+      });
+
+      await pararPreview();
+      await onCadastrarColaborador?.();
+    } catch (error) {
+      setErro(mensagemApi(error));
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const cameraSelecionada = cameras.find((camera) => camera.camera_uid === cameraUid) || null;
+  const quantidadeCapturas = referencias.filter((item) => capturas[item.id]).length;
+  const proxima = referencias.find((item) => !capturas[item.id]) || null;
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-[1350px] mx-auto space-y-5">
       <div>
-        <h2 className="text-xl font-bold text-slate-900">
-          Cadastro de Colaborador
-        </h2>
-        <p className="text-xs text-slate-500 mt-0.5">
-          Preencha os dados do colaborador para registro no sistema
+        <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium mb-2">
+          <span>Colaboradores</span>
+          <ChevronRight className="w-3 h-3" />
+          <span className="text-slate-700 font-semibold">Cadastrar Colaborador</span>
+        </div>
+        <h2 className="text-2xl font-bold text-slate-950">Cadastro de Colaborador</h2>
+        <p className="text-sm text-slate-500 mt-1">
+          Cadastre os dados e três referências faciais para reconhecimento biométrico.
         </p>
       </div>
 
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-2">
-              Foto de Identificação
-            </label>
+      {(erro || previewErro) && (
+        <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{erro || previewErro}</span>
+        </div>
+      )}
 
-            <div className="flex flex-col sm:flex-row items-center gap-5 p-4 rounded-xl bg-slate-50 border border-slate-200">
-              {fotoPreview ? (
-                <div className="relative">
-                  <img
-                    src={fotoPreview}
-                    alt="Preview"
-                    className="w-20 h-20 rounded-full object-cover border-2 border-[#FF7412] shadow-md"
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="grid grid-cols-1 xl:grid-cols-[0.85fr_1.15fr] gap-4">
+          <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+            <div className="flex items-start gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#FF7412] flex items-center justify-center">
+                <UserPlus className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Dados do Colaborador</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">Informações utilizadas no cadastro e no monitoramento.</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Nome completo *</label>
+                <input
+                  type="text"
+                  required
+                  value={nome}
+                  onChange={(e) => setNome(e.target.value)}
+                  placeholder="Ex: Carlos Eduardo Lima"
+                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Matrícula / ID *</label>
+                  <input
+                    type="text"
+                    required
+                    value={matricula}
+                    onChange={(e) => setMatricula(e.target.value)}
+                    placeholder="Ex: 557079"
+                    className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none font-mono"
                   />
-                  <button
-                    type="button"
-                    onClick={handleRemoverFoto}
-                    className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 transition-colors shadow-sm"
-                    title="Remover foto"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
                 </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Setor</label>
+                  <input
+                    type="text"
+                    value={setor}
+                    onChange={(e) => setSetor(e.target.value)}
+                    placeholder="Ex: Produção"
+                    className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Cargo / Função *</label>
+                <input
+                  type="text"
+                  required
+                  value={cargo}
+                  onChange={(e) => setCargo(e.target.value)}
+                  placeholder="Ex: Operador"
+                  className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Câmera para captura *</label>
+                <div className="relative">
+                  <select
+                    value={cameraUid}
+                    onChange={(e) => void trocarCamera(e.target.value)}
+                    disabled={camerasLoading || sessionId}
+                    className="w-full appearance-none text-xs bg-slate-50 border border-slate-300 rounded-lg pl-9 pr-9 py-2.5 focus:border-[#FF7412] focus:outline-none disabled:bg-slate-100"
+                  >
+                    <option value="">Selecione uma câmera</option>
+                    {cameras.map((camera) => (
+                      <option key={camera.camera_uid} value={camera.camera_uid}>
+                        {camera.nome || camera.camera_uid}
+                      </option>
+                    ))}
+                  </select>
+                  <Camera className="w-4 h-4 text-[#FF7412] absolute left-3 top-2.5" />
+                  <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
+                </div>
+                {cameraSelecionada && (
+                  <p className="text-[10px] text-slate-400 mt-1.5">
+                    {cameraSelecionada.nome} • {String(cameraSelecionada.tipo || '-').toUpperCase()}
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-[10px] text-blue-700 leading-relaxed">
+                A foto frontal continua sendo a referência principal do cadastro. As capturas esquerda e direita aumentam a variedade biométrica sem quebrar cadastros antigos.
+              </div>
+            </div>
+          </section>
+
+          <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#FF7412] flex items-center justify-center">
+                  <Camera className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Captura Biométrica</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Capture frente, esquerda e direita usando a câmera cadastrada.</p>
+                </div>
+              </div>
+              <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">
+                {quantidadeCapturas}/3 capturas
+              </span>
+            </div>
+
+            <div className="relative aspect-video rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center">
+              {frameSrc ? (
+                <img src={frameSrc} alt="Preview biométrico" className="absolute inset-0 w-full h-full object-contain bg-black" />
               ) : (
-                <div className="w-20 h-20 rounded-full bg-slate-200 border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400">
-                  <Camera className="w-6 h-6 mb-0.5" />
-                  <span className="text-[9px] uppercase font-semibold">
-                    Sem foto
-                  </span>
+                <div className="text-center px-4">
+                  {iniciandoPreview ? (
+                    <RefreshCw className="w-10 h-10 text-[#FF7412] animate-spin mx-auto mb-3" />
+                  ) : (
+                    <Camera className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+                  )}
+                  <p className="text-xs text-slate-400">
+                    {iniciandoPreview ? 'Abrindo câmera...' : 'Inicie a transmissão para começar a captura.'}
+                  </p>
                 </div>
               )}
 
-              <div className="flex-1 text-center sm:text-left">
-                <label className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 hover:border-[#FF7412] text-slate-700 hover:text-[#FF7412] rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-xs">
-                  <Upload className="w-4 h-4" />
-                  <span>
-                    {fotoPreview ? 'Trocar Foto' : 'Selecionar Imagem'}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleFotoUpload}
-                    className="hidden"
-                  />
-                </label>
-                <p className="text-[11px] text-slate-400 mt-2">
-                  Formatos aceitos: JPG, PNG ou WEBP.
-                </p>
+              {sessionId && (
+                <div className="absolute top-3 left-3 rounded bg-black/65 border border-white/10 px-2 py-1 text-[9px] text-white flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  AO VIVO
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 mt-3">
+              {!sessionId ? (
+                <button
+                  type="button"
+                  onClick={() => void iniciarPreview()}
+                  disabled={iniciandoPreview || !cameraUid}
+                  className="px-4 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-[11px] font-semibold flex items-center gap-2 disabled:opacity-50"
+                >
+                  {iniciandoPreview ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  Iniciar Câmera
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void pararPreview()}
+                  className="px-4 py-2.5 border border-red-200 text-red-600 hover:bg-red-50 rounded-lg text-[11px] font-semibold flex items-center gap-2"
+                >
+                  <Square className="w-4 h-4" />
+                  Parar Câmera
+                </button>
+              )}
+
+              <div className="text-[10px] text-slate-500">
+                {proxima ? (
+                  <><strong>Próxima:</strong> {proxima.titulo} — {proxima.instrucao}</>
+                ) : (
+                  <span className="text-emerald-600 font-semibold">As três capturas foram realizadas.</span>
+                )}
               </div>
             </div>
+
+            {previewInfo?.largura && previewInfo?.altura && (
+              <div className="mt-3 text-[10px] text-slate-400">
+                Resolução: {previewInfo.largura} × {previewInfo.altura}
+                {previewInfo?.fps ? ` • ${previewInfo.fps} FPS` : ''}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Referências Faciais</h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">As capturas são instantâneas. A validação biométrica ocorre ao salvar o colaborador.</p>
+            </div>
+            <span className={`text-[10px] font-semibold ${quantidadeCapturas === 3 ? 'text-emerald-600' : 'text-slate-500'}`}>
+              {quantidadeCapturas === 3 ? 'Capturas prontas para validação' : 'Complete as três posições'}
+            </span>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Nome Completo *
-            </label>
-            <input
-              type="text"
-              required
-              placeholder="Ex: Carlos Eduardo Lima"
-              value={nome}
-              onChange={(e) => setNome(e.target.value)}
-              className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none"
-            />
-          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {referencias.map((referencia) => {
+              const captura = capturas[referencia.id];
+              const emCaptura = capturando === referencia.id;
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Matrícula / ID *
-            </label>
-            <input
-              type="text"
-              required
-              placeholder="Ex: COL-0042"
-              value={matricula}
-              onChange={(e) => setMatricula(e.target.value)}
-              className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:border-[#FF7412] focus:outline-none font-mono"
-            />
-          </div>
+              return (
+                <div key={referencia.id} className={`rounded-xl border p-3 ${captura ? 'border-emerald-200 bg-emerald-50/40' : 'border-slate-200 bg-slate-50'}`}>
+                  <div className="aspect-[4/3] rounded-lg overflow-hidden bg-slate-900 flex items-center justify-center relative">
+                    {captura ? (
+                      <img src={captura.src} alt={`Captura ${referencia.titulo}`} className="w-full h-full object-cover" />
+                    ) : (
+                      <User className="w-10 h-10 text-slate-600" />
+                    )}
+                    {captura && (
+                      <div className="absolute top-2 right-2 w-7 h-7 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow">
+                        <CheckCircle2 className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
 
-          <div className="pt-2 flex items-center gap-3">
-            <button
-              type="submit"
-              className="px-6 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold shadow-sm transition-colors"
-            >
-              Salvar Cadastro
-            </button>
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <strong className="text-xs text-slate-900">{referencia.titulo}</strong>
+                      <span className={`text-[9px] font-bold ${captura ? 'text-emerald-600' : 'text-slate-400'}`}>
+                        {captura ? 'CAPTURADA' : 'PENDENTE'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1 min-h-[30px]">{referencia.instrucao}</p>
+                  </div>
+
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      type="button"
+                      onClick={() => void capturarReferencia(referencia.id)}
+                      disabled={!frameSrc}
+                      className="flex-1 px-3 py-2 rounded-lg bg-[#FF7412] hover:bg-[#e0620a] text-white text-[10px] font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40"
+                    >
+                      {emCaptura ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                      {emCaptura ? 'Capturado' : captura ? 'Refazer' : 'Capturar'}
+                    </button>
+                    {captura && (
+                      <button
+                        type="button"
+                        onClick={() => removerCaptura(referencia.id)}
+                        className="px-3 py-2 rounded-lg border border-slate-300 text-slate-500 hover:text-red-600 hover:border-red-200 text-[10px] font-semibold"
+                      >
+                        Limpar
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </form>
-      </div>
+        </section>
+
+        <div className="flex items-center justify-end gap-3">
+          <button
+            type="submit"
+            disabled={salvando || quantidadeCapturas !== 3}
+            className="px-6 py-2.5 bg-[#FF7412] hover:bg-[#e0620a] text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {salvando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            {salvando ? 'Salvando cadastro...' : 'Salvar Colaborador'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

@@ -216,6 +216,33 @@ def _distancia_cosseno(vetor_a: np.ndarray, vetor_b: np.ndarray) -> float:
     return float(1.0 - np.clip(np.dot(vetor_a, vetor_b), -1.0, 1.0))
 
 
+SUFIXOS_REFERENCIA_BIOMETRICA = {
+    "frontal",
+    "esquerda",
+    "direita",
+}
+
+
+def _matricula_da_referencia_biometrica(caminho: str) -> str:
+    """Resolve a matrícula a partir do nome do arquivo biométrico.
+
+    Compatibilidade:
+    - legado: 557079.jpg -> 557079
+    - múltiplas referências: 557079__esquerda.jpg -> 557079
+    - sufixos desconhecidos continuam sendo tratados como parte da matrícula,
+      evitando reinterpretar arquivos antigos por engano.
+    """
+    nome = os.path.splitext(os.path.basename(caminho))[0].strip()
+    if not nome:
+        return ""
+
+    base, separador, sufixo = nome.rpartition("__")
+    if separador and base and sufixo.casefold() in SUFIXOS_REFERENCIA_BIOMETRICA:
+        return base.strip()
+
+    return nome
+
+
 class ReconhecedorFacial:
     """Reconhecimento facial somente-leitura, com base validada defensivamente.
 
@@ -246,7 +273,7 @@ class ReconhecedorFacial:
 
         os.makedirs(self.db_path, exist_ok=True)
         self._assinatura_base = None
-        self._embeddings: Dict[str, np.ndarray] = {}
+        self._embeddings: Dict[str, List[np.ndarray]] = {}
         self._entradas_invalidas: Dict[str, str] = {}
 
     def _arquivos_base(self) -> List[str]:
@@ -350,21 +377,25 @@ class ReconhecedorFacial:
         if assinatura == self._assinatura_base:
             return
 
-        embeddings: Dict[str, np.ndarray] = {}
+        embeddings: Dict[str, List[np.ndarray]] = {}
         invalidas: Dict[str, str] = {}
 
         arquivos_base = self._arquivos_base()
         print(f"[BIOMETRIA] Base encontrada: {self.db_path} | imagens={len(arquivos_base)}")
 
         for caminho in arquivos_base:
-            matricula = os.path.splitext(os.path.basename(caminho))[0].strip()
+            matricula = _matricula_da_referencia_biometrica(caminho)
             if not matricula:
                 invalidas[caminho] = "MATRICULA_VAZIA"
                 continue
 
             try:
-                embeddings[matricula] = self._representar(caminho)
-                print(f"[BIOMETRIA] Base OK: {os.path.basename(caminho)} -> matricula={matricula}")
+                embedding = self._representar(caminho)
+                embeddings.setdefault(matricula, []).append(embedding)
+                print(
+                    f"[BIOMETRIA] Base OK: {os.path.basename(caminho)} "
+                    f"-> matricula={matricula}"
+                )
             except Exception as erro:
                 invalidas[caminho] = "FALHA_EMBEDDING"
                 print(
@@ -376,8 +407,10 @@ class ReconhecedorFacial:
         self._entradas_invalidas = invalidas
         self._assinatura_base = assinatura
 
+        total_referencias = sum(len(itens) for itens in embeddings.values())
         print(
-            f"[BIOMETRIA] Base carregada | validas={len(embeddings)} "
+            f"[BIOMETRIA] Base carregada | matriculas={len(embeddings)} "
+            f"| referencias_validas={total_referencias} "
             f"| invalidas={len(invalidas)}"
         )
 
@@ -425,13 +458,34 @@ class ReconhecedorFacial:
                 motivo="FALHA_EMBEDDING_CONSULTA",
             )
 
+        # Cada matrícula pode possuir uma ou mais referências biométricas.
+        # Para cada pessoa, usa a menor distância entre suas referências.
+        # Assim, frontal/esquerda/direita continuam pertencendo à MESMA
+        # identidade e não competem entre si no cálculo de ambiguidade.
         ranking = sorted(
             (
-                (_distancia_cosseno(consulta, embedding), matricula)
-                for matricula, embedding in self._embeddings.items()
+                (
+                    min(
+                        _distancia_cosseno(consulta, embedding)
+                        for embedding in referencias
+                    ),
+                    matricula,
+                )
+                for matricula, referencias in self._embeddings.items()
+                if referencias
             ),
             key=lambda item: (item[0], item[1]),
         )
+
+        if not ranking:
+            return ResultadoReconhecimentoFacial(
+                status=RESULTADO_BASE_VAZIA,
+                threshold_distancia=self.distancia_maxima,
+                threshold_margem=self.margem_minima_top1_top2,
+                metodo="DeepFace/cosine",
+                modelo=self.model_name,
+                motivo="SEM_ENTRADAS_BIOMETRICAS_VALIDAS",
+            )
 
         distancia_top1, matricula_top1 = ranking[0]
         distancia_top2 = ranking[1][0] if len(ranking) > 1 else None

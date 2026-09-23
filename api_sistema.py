@@ -27,6 +27,7 @@ from services.camera_service import (
     obter_status_camera,
     verificar_vinculos_camera,
     remover_camera,
+    iniciar_preview_temporario,
     iniciar_preview,
     obter_frame_preview,
     parar_preview,
@@ -744,6 +745,34 @@ def api_cadastrar_camera_usb():
         resultado,
         sucesso_status=201,
     )
+
+
+@app.post("/api/cameras/preview-temporario")
+def api_iniciar_preview_temporario():
+    _, falha = _exigir_autenticacao(
+        apenas_gerencial=True
+    )
+    if falha:
+        return falha
+
+    dados = _json_body()
+
+    indice_usb = dados.get("indice_usb")
+    if indice_usb is None and "indice" in dados:
+        indice_usb = dados.get("indice")
+
+    resultado = iniciar_preview_temporario(
+        fonte=dados.get("fonte"),
+        candidato=dados.get("candidato"),
+        usuario=dados.get("usuario"),
+        senha=dados.get("senha"),
+        indice_usb=indice_usb,
+        nome=dados.get("nome"),
+        qualidade_jpeg=dados.get("qualidade_jpeg", 80),
+        timeout_ms=dados.get("timeout_ms", 3000),
+    )
+
+    return _responder_service(resultado)
 
 
 @app.post("/api/cameras/<camera_uid>/preview")
@@ -1589,20 +1618,71 @@ def api_cadastrar_colaborador():
             400,
         )
 
-    imagem = _decodificar_upload_imagem()
+    # --------------------------------------------------------
+    # BIOMETRIA
+    #
+    # Novo fluxo do frontend:
+    #   imagem_frontal
+    #   imagem_esquerda
+    #   imagem_direita
+    #
+    # Compatibilidade legada:
+    #   imagem_biometrica -> tratada como frontal.
+    # --------------------------------------------------------
+    imagem_frontal = _decodificar_upload_imagem(
+        "imagem_frontal"
+    )
 
-    if imagem is None:
+    if imagem_frontal is None:
+        imagem_frontal = _decodificar_upload_imagem(
+            "imagem_biometrica"
+        )
+
+    imagem_esquerda = _decodificar_upload_imagem(
+        "imagem_esquerda"
+    )
+    imagem_direita = _decodificar_upload_imagem(
+        "imagem_direita"
+    )
+
+    if imagem_frontal is None:
         return _erro(
             "IMAGEM_BIOMETRICA_OBRIGATORIA",
             400,
+        )
+
+    possui_esquerda = imagem_esquerda is not None
+    possui_direita = imagem_direita is not None
+
+    if possui_esquerda != possui_direita:
+        return _erro(
+            "CAPTURAS_BIOMETRICAS_INCOMPLETAS",
+            400,
+            capturas_necessarias=[
+                "frontal",
+                "esquerda",
+                "direita",
+            ],
+        )
+
+    imagens_biometricas = {
+        "frontal": imagem_frontal,
+    }
+
+    if possui_esquerda and possui_direita:
+        imagens_biometricas.update(
+            {
+                "esquerda": imagem_esquerda,
+                "direita": imagem_direita,
+            }
         )
 
     resultado = cadastrar_colaborador(
         matricula=matricula,
         nome=nome,
         cargo=cargo,
-        imagem_biometrica=imagem,
         setor=setor,
+        imagens_biometricas=imagens_biometricas,
     )
 
     return _responder_service(
